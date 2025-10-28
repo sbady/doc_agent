@@ -49,3 +49,9 @@ python3 main.py MSP-7906 --json
 ```bash
 python3 main.py MSP-7906 --json --log-level DEBUG
 ```
+
+
+## Спецификация возможностей
+
+- Подробная логика и правила работы: docs/FEATURE_SPEC.md
+

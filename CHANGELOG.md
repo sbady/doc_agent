@@ -1,11 +1,10 @@
-# Changelog
+# История изменений
 
-## v0.1 — Initial release
+## v0.1 — Первый релиз
 
-- Fetches Jira issue data (summary, description, comments) with PAT/basic auth and API version selection.
-- Renders a Jinja2 prompt from template `prompt_templates/release_summary.txt`.
-- Calls local OpenAI-compatible LLM endpoint; supports `/v1/chat/completions` payload shape.
-- Improved error handling and logging with previews and raw response snippets.
-- LOG_LEVEL configurable via `.env` with CLI flag override `--log-level`.
-- Added `.gitignore` for Python, venv, and local env files.
-
+- Получение данных задачи из Jira (summary, description, comments) с авторизацией PAT/basic и выбором версии API.
+- Формирование промпта по шаблону Jinja2 `prompt_templates/release_summary.txt`.
+- Вызов локального OpenAI‑совместимого LLM; поддержка формата `/v1/chat/completions`.
+- Улучшена обработка ошибок и логирование: превью запросов/ответов, сырой JSON Jira в DEBUG, тело ответа при ошибках.
+- Управление уровнем логирования через `.env` (`LOG_LEVEL`) с переопределением флагом `--log-level`.
+- Добавлен `.gitignore` для Python, виртуального окружения и локальных файлов окружения.

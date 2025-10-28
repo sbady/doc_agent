@@ -10,6 +10,8 @@ from config import AppConfig
 from jira_client import JiraClient
 from llm_client import LLMClient
 from dotenv import load_dotenv
+from release_notes import build_items, make_jira_table, update_table_section, merge_rows_preserve_manual
+import requests
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +32,21 @@ def parse_args() -> argparse.Namespace:
         "--log-level",
         default=None,
         help="Logging level (DEBUG, INFO, WARNING, ERROR). Overrides LOG_LEVEL from .env if set.",
+    )
+    # Release notes workflow args
+    parser.add_argument(
+        "--release-parent",
+        help="Ключ родительской релизной задачи (например, MSP-7288). Если задан, запускается режим релиз-таблицы.",
+    )
+    parser.add_argument(
+        "--release-target",
+        help="Ключ целевой задачи для заполнения таблицы (режим fill). Может быть также задан через TARGET_ISSUE_KEY.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["view", "fill"],
+        default="view",
+        help="Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы в целевой задаче.",
     )
     return parser.parse_args()
 
@@ -75,6 +92,74 @@ def main() -> int:
         logging.error("Failed to load configuration: %s", exc)
         return 1
 
+    # Branch: release notes workflow
+    if args.release_parent or config.release_parent_key:
+        parent_key = args.release_parent or config.release_parent_key
+        jira_client = JiraClient(
+            base_url=config.jira_base_url,
+            email=config.jira_email,
+            api_token=config.jira_api_token,
+            auth_type=config.jira_auth_type,
+            api_version=config.jira_api_version,
+            timeout=config.request_timeout,
+        )
+        llm_client = LLMClient(
+            endpoint=config.llm_endpoint,
+            api_key=config.llm_api_key,
+            model=config.llm_model,
+            temperature=config.llm_temperature,
+            max_tokens=config.issue_short_max_tokens or config.llm_max_tokens,
+            timeout=config.request_timeout,
+            template_path=config.issue_short_template_path,
+        )
+        try:
+            items = build_items(jira_client, llm_client, config, parent_key)
+        except Exception as exc:
+            logging.exception("Failed to build release notes items: %s", exc)
+            return 1
+
+        table = make_jira_table(items)
+
+        if args.mode == "view":
+            print(table)
+            return 0
+
+        # mode == fill
+        target_key = args.release_target or config.target_issue_key
+        if not target_key:
+            logging.error("Target issue key is required in fill mode (use --release-target or TARGET_ISSUE_KEY)")
+            return 1
+
+        # Fetch current description to perform idempotent merge/update
+        try:
+            # Read raw description string via authenticated session
+            url = f"{config.jira_base_url.rstrip('/')}/rest/api/{config.jira_api_version or '3'}/issue/{target_key}"
+            params = {"fields": "description"}
+            r2 = jira_client._session.get(url, params=params, timeout=config.request_timeout)
+            r2.raise_for_status()
+            target_payload = r2.json()
+        except Exception as exc:
+            logging.exception("Failed to fetch target issue %s: %s", target_key, exc)
+            return 1
+
+        current_desc = target_payload.get("fields", {}).get("description")
+        if not isinstance(current_desc, str):
+            logging.error("Target issue description is not a wiki string (likely ADF). Automatic fill is not supported.")
+            print(table)
+            return 1
+
+        merged_table = merge_rows_preserve_manual(current_desc, items)
+        new_desc = update_table_section(current_desc, merged_table)
+
+        try:
+            jira_client.update_issue_description(target_key, new_desc)
+        except Exception:
+            return 1
+
+        logging.info("Updated release table in %s", target_key)
+        return 0
+
+    # Default branch: single issue summary (existing behavior)
     try:
         issue_key = read_issue_key(args)
     except ValueError as exc:

@@ -55,6 +55,31 @@ class LLMClient:
         logger.debug("Summary preview: %s", summary_preview)
         return summary.strip()
 
+    def generate_with_template(self, issue_payload: Dict[str, Any], template_path: Path) -> str:
+        template_text = template_path.read_text(encoding="utf-8")
+        template = Template(template_text)
+        prompt = template.render(
+            title=issue_payload.get("title", ""),
+            description=issue_payload.get("description", ""),
+            comments=issue_payload.get("comments", []),
+        )
+        prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
+        logger.info(
+            "Sending prompt to LLM (custom template): endpoint=%s, model=%s, temperature=%s, max_tokens=%s, prompt_chars=%d",
+            self._endpoint,
+            self._model,
+            self._temperature,
+            self._max_tokens,
+            len(prompt),
+        )
+        logger.debug("Prompt preview: %s", prompt_preview)
+        response = self._invoke_llm(prompt)
+        summary = self._extract_text(response)
+        summary_preview = (summary[:500] + "…") if len(summary) > 500 else summary
+        logger.info("Received LLM response: summary_chars=%d", len(summary))
+        logger.debug("Summary preview: %s", summary_preview)
+        return summary.strip()
+
     def _render_prompt(self, issue_payload: Dict[str, Any]) -> str:
         template_text = self._template_path.read_text(encoding="utf-8")
         template = Template(template_text)

@@ -24,6 +24,11 @@ class AppConfig:
     llm_temperature: float = 0.1
     llm_max_tokens: Optional[int] = 256
     request_timeout: int = 30
+    # Release notes extension
+    release_parent_key: Optional[str] = None
+    target_issue_key: Optional[str] = None
+    issue_short_template_path: Path = Path("prompt_templates/issue_short_summary.txt")
+    issue_short_max_tokens: Optional[int] = 200
 
     @staticmethod
     def _load_env() -> None:
@@ -63,6 +68,13 @@ class AppConfig:
         llm_max_tokens = cls._get_int("LLM_MAX_TOKENS", default=256)
         request_timeout = cls._get_int("REQUEST_TIMEOUT", default=30)
 
+        # Release notes related env
+        release_parent_key = os.getenv("RELEASE_PARENT_KEY")
+        target_issue_key = os.getenv("TARGET_ISSUE_KEY")
+        short_tmpl_env = os.getenv("ISSUE_SHORT_TEMPLATE_PATH", "prompt_templates/issue_short_summary.txt")
+        issue_short_template_path = cls._resolve_path(short_tmpl_env)
+        issue_short_max_tokens = cls._get_int("ISSUE_SHORT_MAX_TOKENS", default=200)
+
         return cls(
             jira_base_url=jira_base_url,
             jira_api_token=jira_api_token,
@@ -76,6 +88,10 @@ class AppConfig:
             llm_temperature=llm_temperature,
             llm_max_tokens=llm_max_tokens,
             request_timeout=request_timeout,
+            release_parent_key=release_parent_key,
+            target_issue_key=target_issue_key,
+            issue_short_template_path=issue_short_template_path,
+            issue_short_max_tokens=issue_short_max_tokens,
         )
 
     @classmethod
