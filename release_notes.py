@@ -171,37 +171,65 @@ def sanitize_short_for_wiki(text: str) -> str:
     t = t.replace("\r\n", "\n").replace("\r", "\n")
     if "\n" in t:
         parts = [p.strip() for p in t.split("\n") if p.strip()]
-        t = " \\\ ".join(parts)
+        # Jira wiki hard line break is two backslashes
+        t = r" \\ ".join(parts)
     # Escape pipes
     t = escape_pipes(t)
     return t
 
 
 def update_table_section(original: str, new_table: str) -> str:
-    """Replace or insert the release table section headed by the specific h2 title."""
+    """Update only the table block under the specific h2 title without touching other content.
+
+    - If h2 not found: append full new_table at the end.
+    - If h2 found but no table header: insert table right after the h2 line.
+    - If table found: replace only the table header + rows block, keep everything before/after.
+    """
     header_re = re.compile(r"(?mi)^h2\.\s*Таблица релиза.*$")
+    header_line = "||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||"
+    row_re = re.compile(r"^\|.*\|$")
+
+    # Extract only the table block from provided new_table (drop its h2 if present)
+    nt_lines = (new_table or "").splitlines()
+    try:
+        nt_start = nt_lines.index(header_line)
+    except ValueError:
+        # Fallback: find the first line starting with '||'
+        nt_start = next((i for i, l in enumerate(nt_lines) if l.strip().startswith("||")), 0)
+    new_block = nt_lines[nt_start:]
+
     if not header_re.search(original or ""):
-        # Append new table with a separating blank line
         base = (original or "").rstrip()
         return f"{base}\n\n{new_table}\n"
 
-    # Find start of section and end (next h2 or end of text)
     lines = (original or "").splitlines()
-    start = None
-    for i, ln in enumerate(lines):
-        if header_re.match(ln):
-            start = i
-            break
-    if start is None:
+    # Locate the h2 header line
+    h2_idx = next((i for i, ln in enumerate(lines) if header_re.match(ln)), None)
+    if h2_idx is None:
         return (original or "") + "\n\n" + new_table + "\n"
-    # Find end
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        if re.match(r"^h2\.\s*", lines[j]):
-            end = j
+
+    # Locate existing table header after h2
+    tbl_hdr_idx = None
+    for i in range(h2_idx + 1, len(lines)):
+        if lines[i].strip() == header_line:
+            tbl_hdr_idx = i
             break
-    new_lines = lines[:start] + new_table.splitlines() + lines[end:]
-    return "\n".join(new_lines) + ("\n" if original.endswith("\n") else "")
+        # stop early if another header encountered before table
+        if lines[i].startswith("h2."):
+            break
+
+    if tbl_hdr_idx is None:
+        # Insert new block after h2, keep the rest intact
+        new_lines = lines[: h2_idx + 1] + new_block + lines[h2_idx + 1 :]
+        return "\n".join(new_lines)
+
+    # Find end of existing table: first non-row after header
+    end = tbl_hdr_idx + 1
+    while end < len(lines) and row_re.match(lines[end]):
+        end += 1
+
+    new_lines = lines[:tbl_hdr_idx] + new_block + lines[end:]
+    return "\n".join(new_lines)
 
 
 def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> str:
