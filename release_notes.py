@@ -142,13 +142,39 @@ def make_jira_table(items: List[RNItem]) -> str:
     lines.append("h2. Таблица релиза: в какие статьи нужно внести изменения")
     lines.append("||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||")
     for it in items:
-        task_cell = f"[{it.key} {escape_pipes(it.title)}|{it.url}]"
-        lines.append(f"|{task_cell}|{it.stand}|{it.kind}|-|-|{escape_pipes(it.short)}|")
+        # Гиперссылка только на номер, название — текстом
+        task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
+        short_cell = sanitize_short_for_wiki(it.short)
+        lines.append(f"|{task_cell}|{it.stand}|{it.kind}|-|-|{short_cell}|")
     return "\n".join(lines)
 
 
 def escape_pipes(text: str) -> str:
     return (text or "").replace("|", "\\|")
+
+
+def sanitize_short_for_wiki(text: str) -> str:
+    """Sanitize short description for Jira wiki table cell.
+
+    - Trim and strip wrapping quotes
+    - Replace newlines with Jira hard breaks "\\\" (double backslash)
+    - Escape pipe characters
+    """
+    t = (text or "").strip()
+    # Remove surrounding quotes if present
+    pairs = [("\"", "\""), ("“", "”"), ("«", "»")]
+    for lq, rq in pairs:
+        if t.startswith(lq) and t.endswith(rq):
+            t = t[len(lq):-len(rq)].strip()
+            break
+    # Normalize newlines and replace with hard line breaks
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" in t:
+        parts = [p.strip() for p in t.split("\n") if p.strip()]
+        t = " \\\ ".join(parts)
+    # Escape pipes
+    t = escape_pipes(t)
+    return t
 
 
 def update_table_section(original: str, new_table: str) -> str:
@@ -208,12 +234,14 @@ def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> st
         m = pattern_row.match(lines[i])
         if not m:
             continue
-        raw_cells = m.group(1).split("|")
+        # Split by unescaped pipes so escaped '\|' stay within a cell
+        raw_cells = re.split(r"(?<!\\)\|", m.group(1))
         cells = [c.strip() for c in raw_cells]
         if not cells:
             continue
         # first cell contains link like [KEY Title|url]
-        key_match = re.search(r"\[([A-Z][A-Z0-9]+-\d+)[^\]]*\|", cells[0])
+        # Support both forms: [KEY|url] Title  and legacy [KEY Title|url]
+        key_match = re.search(r"\[([A-Z][A-Z0-9]+-\d+)(?:[^\]]*?)\|", cells[0])
         if key_match:
             existing[key_match.group(1)] = cells
 
@@ -223,6 +251,8 @@ def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> st
         keep = existing.get(it.key)
         col4 = keep[3] if keep and len(keep) > 3 else "-"
         col5 = keep[4] if keep and len(keep) > 4 else "-"
-        task_cell = f"[{it.key} {escape_pipes(it.title)}|{it.url}]"
-        out_lines.append(f"|{task_cell}|{it.stand}|{it.kind}|{col4}|{col5}|{escape_pipes(it.short)}|")
+        # Ссылка только на номер, название — текст
+        task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
+        short_cell = sanitize_short_for_wiki(it.short)
+        out_lines.append(f"|{task_cell}|{it.stand}|{it.kind}|{col4}|{col5}|{short_cell}|")
     return "\n".join(out_lines)
