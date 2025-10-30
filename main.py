@@ -130,6 +130,12 @@ def main() -> int:
             logging.error("Target issue key is required in fill mode (use --release-target or TARGET_ISSUE_KEY)")
             return 1
 
+        # If a numeric ID (e.g., "7382") is provided, infer project key from parent (e.g., MSP-7382)
+        if "-" not in str(target_key) and parent_key and "-" in parent_key:
+            project = parent_key.split("-", 1)[0]
+            logging.info("Inferring target key from parent project: %s -> %s-%s", target_key, project, target_key)
+            target_key = f"{project}-{target_key}"
+
         # Fetch current description to perform idempotent merge/update
         try:
             # Read raw description string via authenticated session
