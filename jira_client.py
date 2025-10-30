@@ -115,6 +115,19 @@ class JiraClient:
                 logger.debug("Issue payload (repr): %r", issue_data)
         return issue_data
 
+    # Write API: update description (Server/DC wiki markup). For Cloud ADF, this won't work.
+    def update_issue_description(self, issue_key: str, description: str) -> None:
+        version_segment = self._api_version or "3"
+        url = f"{self._base_url}/rest/api/{version_segment}/issue/{issue_key}"
+        payload = {"fields": {"description": description}}
+        logger.info("Updating description for %s (length=%d)", issue_key, len(description or ""))
+        response = self._session.put(url, json=payload, timeout=self._timeout)
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            logger.error("Failed to update %s: %s | Body: %s", issue_key, exc, response.text[:300])
+            raise
+
     def _extract_comments(self, comments: List[Dict[str, Any]]) -> List[str]:
         extracted: List[str] = []
         for comment in comments:
