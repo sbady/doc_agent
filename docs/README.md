@@ -55,3 +55,18 @@ python3 main.py MSP-7906 --json --log-level DEBUG
 
 - Подробная логика и правила работы: docs/FEATURE_SPEC.md
 
+
+
+## Релиз-таблица: запуск
+
+- Просмотр (без изменений в Jira):
+  - python main.py --release-parent MSP-XXXX --mode view 
+- Заполнение описания целевой задачи таблицей:
+  - python main.py --release-parent MSP-XXXX --release-target MSP-YYYY --mode fill 
+- Через .env можно указать:
+  - RELEASE_PARENT_KEY, TARGET_ISSUE_KEY, LOG_LEVEL (например, DEBUG)
+- Требования:
+  - Запущенный LLM (LLM_ENDPOINT, LLM_MODEL), доступ к Jira, права на редактирование целевой задачи.
+
+Подробности: docs/FEATURE_SPEC.md
+
