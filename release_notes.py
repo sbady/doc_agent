@@ -144,7 +144,7 @@ def make_jira_table(items: List[RNItem]) -> str:
     for it in items:
         # Гиперссылка только на номер, название — текстом
         task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
-        short_cell = sanitize_short_for_wiki(it.short)
+        short_cell = sanitize_cell(it.short)
         lines.append(f"|{task_cell}|{it.stand}|{it.kind}|-|-|{short_cell}|")
     return "\n".join(lines)
 
@@ -175,6 +175,36 @@ def sanitize_short_for_wiki(text: str) -> str:
         t = r" \\ ".join(parts)
     # Escape pipes
     t = escape_pipes(t)
+    return t
+
+
+def sanitize_cell(text: str) -> str:
+    """Robust sanitization to keep wiki table layout safe.
+
+    - Strip outer quotes (", “”, «»)
+    - Convert any newline-like separators to Jira hard breaks (two backslashes)
+    - Escape only unescaped pipes so cell delimiters don't leak
+    """
+    t = (text or "").strip()
+    pairs = [("\"", "\""), ("“", "”"), ("«", "»")]
+    for lq, rq in pairs:
+        if t.startswith(lq) and t.endswith(rq):
+            t = t[len(lq):-len(rq)].strip()
+            break
+    # Normalize all newlines and unicode separators
+    t = (t.replace("\r\n", "\n")
+           .replace("\r", "\n")
+           .replace("\u2028", "\n")
+           .replace("\u2029", "\n")
+           .replace("\v", "\n")
+           .replace("\f", "\n"))
+    if "\n" in t:
+        parts = [p.strip() for p in t.split("\n") if p.strip()]
+        t = r" \\ ".join(parts)
+    # Escape only unescaped pipes
+    t = re.sub(r"(?<!\\)\|", r"\\|", t)
+    # Normalize spaces around hard breaks to ' \\ '
+    t = re.sub(r"\s*\\\\\s*", r" \\\\ ", t)
     return t
 
 
@@ -281,6 +311,6 @@ def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> st
         col5 = keep[4] if keep and len(keep) > 4 else "-"
         # Ссылка только на номер, название — текст
         task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
-        short_cell = sanitize_short_for_wiki(it.short)
+        short_cell = sanitize_cell(it.short)
         out_lines.append(f"|{task_cell}|{it.stand}|{it.kind}|{col4}|{col5}|{short_cell}|")
     return "\n".join(out_lines)
