@@ -61,7 +61,7 @@ class LLMClient:
             logger.debug("Summary tail: %s", summary_tail)
         return summary.strip()
 
-    def generate_with_template(self, issue_payload: Dict[str, Any], template_path: Path) -> str:
+    def generate_with_template(self, issue_payload: Dict[str, Any], template_path: Path, *, system_prompt: Optional[str] = None) -> str:
         template_text = template_path.read_text(encoding="utf-8")
         template = Template(template_text)
         prompt = template.render(
@@ -84,11 +84,6 @@ class LLMClient:
         if prompt_tail:
             logger.debug("Prompt tail: %s", prompt_tail)
 
-        # Provide a focused system prompt for short summaries
-        system_prompt = (
-            "Вы — технический редактор релиз-нот. Пиши кратко на русском. "
-            "Если задача сугубо техническая — верни ровно: не описываем."
-        )
         response = self._invoke_llm(prompt, system_prompt=system_prompt)
         summary = self._extract_text(response)
         summary_preview = (summary[:500] + "…") if len(summary) > 500 else summary

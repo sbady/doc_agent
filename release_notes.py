@@ -81,9 +81,9 @@ def map_issue_type_to_kind(issue_type_name: str) -> str:
     return "Фича"
 
 
-def generate_short_description(llm: LLMClient, payload: Dict[str, Any], template_path) -> str:
+def generate_short_description(llm: LLMClient, payload: Dict[str, Any], template_path, system_prompt: Optional[str] = None) -> str:
     try:
-        text = llm.generate_with_template(payload, template_path)
+        text = llm.generate_with_template(payload, template_path, system_prompt=system_prompt)
         return text.strip() or "не описываем"
     except Exception as exc:
         logger.error("LLM short description failed: %s", exc)
@@ -116,7 +116,7 @@ def build_items(jira: JiraClient, llm: LLMClient, cfg: AppConfig, parent_key: st
         issue_data = jira.get_issue_data(key)
         stand, had_field = extract_stand_from_description(issue_data.get("description", ""))
         kind = map_issue_type_to_kind(issuetype)
-        short = generate_short_description(llm, issue_data, cfg.issue_short_template_path)
+        short = generate_short_description(llm, issue_data, cfg.issue_short_template_path, system_prompt=cfg.issue_short_system_prompt)
         url = f"{jira._base_url}/browse/{key}"
         items.append(RNItem(key=key, title=issue_data.get("title", ""), url=url, stand=stand, kind=kind, short=short))
 
