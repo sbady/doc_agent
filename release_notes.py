@@ -142,10 +142,8 @@ def make_jira_table(items: List[RNItem]) -> str:
     lines.append("h2. Таблица релиза: в какие статьи нужно внести изменения")
     lines.append("||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||")
     for it in items:
-        # Гиперссылка только на номер, название — текстом
-        task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
-        short_cell = sanitize_short_for_wiki(it.short)
-        lines.append(f"|{task_cell}|{it.stand}|{it.kind}|-|-|{short_cell}|")
+        task_cell = f"[{it.key} {escape_pipes(it.title)}|{it.url}]"
+        lines.append(f"|{task_cell}|{it.stand}|{it.kind}|-|-|{escape_pipes(it.short)}|")
     return "\n".join(lines)
 
 
@@ -153,83 +151,31 @@ def escape_pipes(text: str) -> str:
     return (text or "").replace("|", "\\|")
 
 
-def sanitize_short_for_wiki(text: str) -> str:
-    """Sanitize short description for Jira wiki table cell.
-
-    - Trim and strip wrapping quotes
-    - Replace newlines with Jira hard breaks "\\\" (double backslash)
-    - Escape pipe characters
-    """
-    t = (text or "").strip()
-    # Remove surrounding quotes if present
-    pairs = [("\"", "\""), ("“", "”"), ("«", "»")]
-    for lq, rq in pairs:
-        if t.startswith(lq) and t.endswith(rq):
-            t = t[len(lq):-len(rq)].strip()
-            break
-    # Normalize newlines and replace with hard line breaks
-    t = t.replace("\r\n", "\n").replace("\r", "\n")
-    if "\n" in t:
-        parts = [p.strip() for p in t.split("\n") if p.strip()]
-        # Jira wiki hard line break is two backslashes
-        t = r" \\ ".join(parts)
-    # Escape pipes
-    t = escape_pipes(t)
-    return t
-
-
 def update_table_section(original: str, new_table: str) -> str:
-    """Update only the table block under the specific h2 title without touching other content.
-
-    - If h2 not found: append full new_table at the end.
-    - If h2 found but no table header: insert table right after the h2 line.
-    - If table found: replace only the table header + rows block, keep everything before/after.
-    """
+    """Replace or insert the release table section headed by the specific h2 title."""
     header_re = re.compile(r"(?mi)^h2\.\s*Таблица релиза.*$")
-    header_line = "||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||"
-    row_re = re.compile(r"^\|.*\|$")
-
-    # Extract only the table block from provided new_table (drop its h2 if present)
-    nt_lines = (new_table or "").splitlines()
-    try:
-        nt_start = nt_lines.index(header_line)
-    except ValueError:
-        # Fallback: find the first line starting with '||'
-        nt_start = next((i for i, l in enumerate(nt_lines) if l.strip().startswith("||")), 0)
-    new_block = nt_lines[nt_start:]
-
     if not header_re.search(original or ""):
+        # Append new table with a separating blank line
         base = (original or "").rstrip()
         return f"{base}\n\n{new_table}\n"
 
+    # Find start of section and end (next h2 or end of text)
     lines = (original or "").splitlines()
-    # Locate the h2 header line
-    h2_idx = next((i for i, ln in enumerate(lines) if header_re.match(ln)), None)
-    if h2_idx is None:
+    start = None
+    for i, ln in enumerate(lines):
+        if header_re.match(ln):
+            start = i
+            break
+    if start is None:
         return (original or "") + "\n\n" + new_table + "\n"
-
-    # Locate existing table header after h2
-    tbl_hdr_idx = None
-    for i in range(h2_idx + 1, len(lines)):
-        if lines[i].strip() == header_line:
-            tbl_hdr_idx = i
+    # Find end
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if re.match(r"^h2\.\s*", lines[j]):
+            end = j
             break
-        # stop early if another header encountered before table
-        if lines[i].startswith("h2."):
-            break
-
-    if tbl_hdr_idx is None:
-        # Insert new block after h2, keep the rest intact
-        new_lines = lines[: h2_idx + 1] + new_block + lines[h2_idx + 1 :]
-        return "\n".join(new_lines)
-
-    # Find end of existing table: first non-row after header
-    end = tbl_hdr_idx + 1
-    while end < len(lines) and row_re.match(lines[end]):
-        end += 1
-
-    new_lines = lines[:tbl_hdr_idx] + new_block + lines[end:]
-    return "\n".join(new_lines)
+    new_lines = lines[:start] + new_table.splitlines() + lines[end:]
+    return "\n".join(new_lines) + ("\n" if original.endswith("\n") else "")
 
 
 def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> str:
@@ -262,14 +208,12 @@ def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> st
         m = pattern_row.match(lines[i])
         if not m:
             continue
-        # Split by unescaped pipes so escaped '\|' stay within a cell
-        raw_cells = re.split(r"(?<!\\)\|", m.group(1))
+        raw_cells = m.group(1).split("|")
         cells = [c.strip() for c in raw_cells]
         if not cells:
             continue
         # first cell contains link like [KEY Title|url]
-        # Support both forms: [KEY|url] Title  and legacy [KEY Title|url]
-        key_match = re.search(r"\[([A-Z][A-Z0-9]+-\d+)(?:[^\]]*?)\|", cells[0])
+        key_match = re.search(r"\[([A-Z][A-Z0-9]+-\d+)[^\]]*\|", cells[0])
         if key_match:
             existing[key_match.group(1)] = cells
 
@@ -279,8 +223,6 @@ def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> st
         keep = existing.get(it.key)
         col4 = keep[3] if keep and len(keep) > 3 else "-"
         col5 = keep[4] if keep and len(keep) > 4 else "-"
-        # Ссылка только на номер, название — текст
-        task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
-        short_cell = sanitize_short_for_wiki(it.short)
-        out_lines.append(f"|{task_cell}|{it.stand}|{it.kind}|{col4}|{col5}|{short_cell}|")
+        task_cell = f"[{it.key} {escape_pipes(it.title)}|{it.url}]"
+        out_lines.append(f"|{task_cell}|{it.stand}|{it.kind}|{col4}|{col5}|{escape_pipes(it.short)}|")
     return "\n".join(out_lines)

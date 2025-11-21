@@ -29,6 +29,7 @@ class AppConfig:
     target_issue_key: Optional[str] = None
     issue_short_template_path: Path = Path("prompt_templates/issue_short_summary.txt")
     issue_short_max_tokens: Optional[int] = 200
+    issue_short_system_prompt: Optional[str] = None
 
     @staticmethod
     def _load_env() -> None:
@@ -74,6 +75,7 @@ class AppConfig:
         short_tmpl_env = os.getenv("ISSUE_SHORT_TEMPLATE_PATH", "prompt_templates/issue_short_summary.txt")
         issue_short_template_path = cls._resolve_path(short_tmpl_env)
         issue_short_max_tokens = cls._get_int("ISSUE_SHORT_MAX_TOKENS", default=200)
+        issue_short_system_prompt = os.getenv("ISSUE_SHORT_SYSTEM_PROMPT") or None
 
         return cls(
             jira_base_url=jira_base_url,
@@ -92,6 +94,7 @@ class AppConfig:
             target_issue_key=target_issue_key,
             issue_short_template_path=issue_short_template_path,
             issue_short_max_tokens=issue_short_max_tokens,
+            issue_short_system_prompt=issue_short_system_prompt,
         )
 
     @classmethod

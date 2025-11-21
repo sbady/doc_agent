@@ -36,6 +36,7 @@ class LLMClient:
         prompt = self._render_prompt(issue_payload)
         # Log outgoing prompt (preview) at INFO for traceability
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
+        prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""
         logger.info(
             "Sending prompt to LLM: endpoint=%s, model=%s, temperature=%s, max_tokens=%s, prompt_chars=%d",
             self._endpoint,
@@ -45,25 +46,32 @@ class LLMClient:
             len(prompt),
         )
         logger.debug("Prompt preview: %s", prompt_preview)
+        if prompt_tail:
+            logger.debug("Prompt tail: %s", prompt_tail)
 
-        response = self._invoke_llm(prompt)
+        response = self._invoke_llm(prompt, system_prompt=None)
         summary = self._extract_text(response)
 
         # Log received summary (preview)
         summary_preview = (summary[:500] + "…") if len(summary) > 500 else summary
+        summary_tail = ("…" + summary[-200:]) if len(summary) > 700 else ""
         logger.info("Received LLM response: summary_chars=%d", len(summary))
         logger.debug("Summary preview: %s", summary_preview)
+        if summary_tail:
+            logger.debug("Summary tail: %s", summary_tail)
         return summary.strip()
 
-    def generate_with_template(self, issue_payload: Dict[str, Any], template_path: Path) -> str:
+    def generate_with_template(self, issue_payload: Dict[str, Any], template_path: Path, *, system_prompt: Optional[str] = None) -> str:
         template_text = template_path.read_text(encoding="utf-8")
         template = Template(template_text)
         prompt = template.render(
             title=issue_payload.get("title", ""),
             description=issue_payload.get("description", ""),
             comments=issue_payload.get("comments", []),
+            issue_type=issue_payload.get("issue_type", ""),
         )
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
+        prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""
         logger.info(
             "Sending prompt to LLM (custom template): endpoint=%s, model=%s, temperature=%s, max_tokens=%s, prompt_chars=%d",
             self._endpoint,
@@ -73,11 +81,17 @@ class LLMClient:
             len(prompt),
         )
         logger.debug("Prompt preview: %s", prompt_preview)
-        response = self._invoke_llm(prompt)
+        if prompt_tail:
+            logger.debug("Prompt tail: %s", prompt_tail)
+
+        response = self._invoke_llm(prompt, system_prompt=system_prompt)
         summary = self._extract_text(response)
         summary_preview = (summary[:500] + "…") if len(summary) > 500 else summary
+        summary_tail = ("…" + summary[-200:]) if len(summary) > 700 else ""
         logger.info("Received LLM response: summary_chars=%d", len(summary))
         logger.debug("Summary preview: %s", summary_preview)
+        if summary_tail:
+            logger.debug("Summary tail: %s", summary_tail)
         return summary.strip()
 
     def _render_prompt(self, issue_payload: Dict[str, Any]) -> str:
@@ -91,7 +105,7 @@ class LLMClient:
         logger.debug("Rendered prompt length: %s characters", len(prompt))
         return prompt
 
-    def _invoke_llm(self, prompt: str) -> Dict[str, Any]:
+    def _invoke_llm(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -104,9 +118,13 @@ class LLMClient:
                 raise ValueError(
                     "LLM_MODEL is required for /v1/chat/completions endpoints"
                 )
+            messages: list[dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
             payload: Dict[str, Any] = {
                 "model": self._model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "temperature": self._temperature,
             }
             if self._max_tokens is not None:

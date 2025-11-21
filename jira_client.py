@@ -51,7 +51,7 @@ class JiraClient:
         """Fetch issue fields required for the summary prompt."""
         version_segment = self._api_version or "3"
         url = f"{self._base_url}/rest/api/{version_segment}/issue/{issue_key}"
-        params = {"fields": "summary,description,comment"}
+        params = {"fields": "summary,description,comment,issuetype"}
 
         logger.debug("Requesting issue %s from %s", issue_key, url)
         response = self._session.get(url, params=params, timeout=self._timeout)
@@ -80,20 +80,23 @@ class JiraClient:
         title = fields.get("summary") or ""
         description_raw = fields.get("description")
         comments_raw = fields.get("comment", {}).get("comments", [])
+        issue_type_name = (fields.get("issuetype") or {}).get("name", "")
 
         issue_data = {
             "title": title.strip(),
             "description": self._extract_text(description_raw),
             "comments": self._extract_comments(comments_raw),
+            "issue_type": issue_type_name or "",
         }
 
         # Log concise details about fetched issue
         desc = issue_data.get("description", "")
         comments = issue_data.get("comments", []) or []
         logger.info(
-            "Fetched Jira issue %s: title='%s' | description_chars=%d | comments=%d",
+            "Fetched Jira issue %s: title='%s' | type='%s' | description_chars=%d | comments=%d",
             issue_key,
             (issue_data.get("title", "") or "").strip(),
+            issue_data.get("issue_type", ""),
             len(desc),
             len(comments),
         )
