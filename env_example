@@ -1,0 +1,32 @@
+# Jira connection
+JIRA_BASE_URL=https://jira-test.example.com/
+JIRA_EMAIL=user@example.com
+JIRA_API_TOKEN=your_token_here
+JIRA_AUTH_TYPE=pat
+JIRA_API_VERSION=latest
+
+# Optional default issue key for single-issue mode
+JIRA_ISSUE_KEY=
+
+# LLM endpoint configuration
+LLM_ENDPOINT=http://127.0.0.1:1234/v1/chat/completions
+LLM_API_KEY=
+LLM_MODEL=openai/gpt-oss-20b
+LLM_TEMPERATURE=0.3
+LLM_MAX_TOKENS=500
+
+# Prompt template location (relative to project root)
+PROMPT_TEMPLATE_PATH=prompt_templates/release_summary.txt
+
+# Network request timeout (seconds)
+REQUEST_TIMEOUT=60
+
+# Logging
+LOG_LEVEL=INFO
+
+# Release notes workflow
+RELEASE_PARENT_KEY=
+TARGET_ISSUE_KEY=
+ISSUE_SHORT_TEMPLATE_PATH=prompt_templates/issue_short_summary.txt
+ISSUE_SHORT_MAX_TOKENS=300
+ISSUE_SHORT_SYSTEM_PROMPT=

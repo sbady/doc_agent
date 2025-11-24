@@ -187,6 +187,41 @@ class LLMClient:
                     return choice["text"]
                 message = choice.get("message")
                 if isinstance(message, dict) and "content" in message:
-                    return message["content"]
+                    content = message.get("content") or ""
+                    if content:
+                        return content
+                    # DeepSeek sometimes returns the answer only in reasoning_content
+                    reasoning = message.get("reasoning_content") or ""
+                    trimmed = LLMClient._reasoning_to_text(reasoning)
+                    if trimmed:
+                        return trimmed
 
         raise ValueError("Unexpected LLM response format")
+
+    @staticmethod
+    def _reasoning_to_text(reasoning: str) -> str:
+        """Reduce verbose reasoning_content to a single-line answer."""
+        if not reasoning:
+            return ""
+        lowered = reasoning.lower()
+        markers = ["ответ:", "final answer:", "result:", "результат:"]
+        segment = reasoning
+        for m in markers:
+            pos = lowered.find(m)
+            if pos != -1:
+                segment = reasoning[pos + len(m):]
+                break
+        lines = [ln.strip() for ln in segment.splitlines() if ln.strip()]
+        # Heuristics to drop "analysis" lines and pick the first meaningful one
+        def is_noise(line: str) -> bool:
+            l = line.lower()
+            return l.startswith(("-", "*", "—", "1)", "2)", "3)")) or any(
+                kw in l for kw in ["правило", "формат", "эмодзи", "проверяю", "проверка", "сначала анализирую", "тип задачи", "пользовательская ценность"]
+            )
+
+        for ln in lines:
+            if not is_noise(ln):
+                return ln
+        if lines:
+            return lines[-1]
+        return segment.strip()
