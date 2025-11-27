@@ -30,6 +30,10 @@ class AppConfig:
     issue_short_template_path: Path = Path("prompt_templates/issue_short_summary.txt")
     issue_short_max_tokens: Optional[int] = 200
     issue_short_system_prompt: Optional[str] = None
+    # Refine layer
+    refine_prompt_path: Path = Path("prompt_templates/refine_release_summary.txt")
+    refine_system_prompt: Optional[str] = None
+    refine_max_tokens: Optional[int] = None
 
     @staticmethod
     def _load_env() -> None:
@@ -77,6 +81,11 @@ class AppConfig:
         issue_short_max_tokens = cls._get_int("ISSUE_SHORT_MAX_TOKENS", default=200)
         issue_short_system_prompt = os.getenv("ISSUE_SHORT_SYSTEM_PROMPT") or None
 
+        refine_prompt_env = os.getenv("REFINE_PROMPT_PATH", "prompt_templates/refine_release_summary.txt")
+        refine_prompt_path = cls._resolve_path(refine_prompt_env)
+        refine_system_prompt = os.getenv("REFINE_SYSTEM_PROMPT") or None
+        refine_max_tokens = cls._get_int("REFINE_MAX_TOKENS", default=None)
+
         return cls(
             jira_base_url=jira_base_url,
             jira_api_token=jira_api_token,
@@ -95,6 +104,9 @@ class AppConfig:
             issue_short_template_path=issue_short_template_path,
             issue_short_max_tokens=issue_short_max_tokens,
             issue_short_system_prompt=issue_short_system_prompt,
+            refine_prompt_path=refine_prompt_path,
+            refine_system_prompt=refine_system_prompt,
+            refine_max_tokens=refine_max_tokens,
         )
 
     @classmethod

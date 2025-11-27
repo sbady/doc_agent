@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """Client for interacting with the configured LLM endpoint."""
 
+    _prompt_chars_total: int = 0
+
     def __init__(
         self,
         endpoint: str,
@@ -34,6 +36,7 @@ class LLMClient:
 
     def generate_summary(self, issue_payload: Dict[str, Any]) -> str:
         prompt = self._render_prompt(issue_payload)
+        self._add_prompt_chars(len(prompt))
         # Log outgoing prompt (preview) at INFO for traceability
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
         prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""
@@ -70,6 +73,7 @@ class LLMClient:
             comments=issue_payload.get("comments", []),
             issue_type=issue_payload.get("issue_type", ""),
         )
+        self._add_prompt_chars(len(prompt))
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
         prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""
         logger.info(
@@ -212,16 +216,27 @@ class LLMClient:
                 segment = reasoning[pos + len(m):]
                 break
         lines = [ln.strip() for ln in segment.splitlines() if ln.strip()]
-        # Heuristics to drop "analysis" lines and pick the first meaningful one
+        # Heuristics to drop analysis lines and pick the final meaningful one
         def is_noise(line: str) -> bool:
             l = line.lower()
             return l.startswith(("-", "*", "—", "1)", "2)", "3)")) or any(
                 kw in l for kw in ["правило", "формат", "эмодзи", "проверяю", "проверка", "сначала анализирую", "тип задачи", "пользовательская ценность"]
             )
 
-        for ln in lines:
-            if not is_noise(ln):
-                return ln
+        meaningful = [ln for ln in lines if not is_noise(ln)]
+        if meaningful:
+            return meaningful[-1]
         if lines:
             return lines[-1]
         return segment.strip()
+
+    @classmethod
+    def _add_prompt_chars(cls, count: int) -> None:
+        try:
+            cls._prompt_chars_total += int(count)
+        except Exception:
+            pass
+
+    @classmethod
+    def get_total_prompt_chars(cls) -> int:
+        return cls._prompt_chars_total

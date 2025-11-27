@@ -249,10 +249,15 @@ def sort_items(items: List[RNItem]) -> List[RNItem]:
 # ----------------------------
 
 def make_jira_table(items: List[RNItem]) -> str:
+    return make_jira_table_from_items(items, preserve_order=False)
+
+
+def make_jira_table_from_items(items: List[RNItem], preserve_order: bool = False) -> str:
     lines = []
     lines.append("h2. Таблица релиза: в какие статьи нужно внести изменения")
     lines.append("||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||")
-    for it in items:
+    ordered = items if preserve_order else sort_items(items)
+    for it in ordered:
         task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
         lines.append(f"|{task_cell}|{it.stand}|{it.kind}|-|-|{escape_pipes(it.short)}|")
     return "\n".join(lines)
@@ -330,3 +335,48 @@ def merge_rows_preserve_manual(current_desc: str, new_items: List[RNItem]) -> st
         task_cell = f"[{it.key}|{it.url}] {escape_pipes(it.title)}"
         out_lines.append(f"|{task_cell}|{it.stand}|{it.kind}|{col4}|{col5}|{escape_pipes(it.short)}|")
     return "\n".join(out_lines)
+
+
+def parse_existing_table(current_desc: str) -> List[RNItem]:
+    """Parse existing release table rows from description into RNItem list (keep order)."""
+    header_re = re.compile(r"\|\|.*Задача.*Краткое\s+описание.*\|\|", flags=re.IGNORECASE)
+    if not header_re.search(current_desc or ""):
+        logger.debug("parse_existing_table: header not found in description (len=%d)", len(current_desc or ""))
+        return []
+    pattern_row = re.compile(r"^\|(.*)\|$")
+    lines = (current_desc or "").splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if header_re.search(ln.strip()):
+            start = i
+            break
+    if start is None:
+        logger.debug("parse_existing_table: header line index not found")
+        return []
+    end = start + 1
+    while end < len(lines) and pattern_row.match(lines[end]):
+        end += 1
+
+    items: List[RNItem] = []
+    for i in range(start + 1, end):
+        m = pattern_row.match(lines[i])
+        if not m:
+            continue
+        raw = m.group(1)
+        # Split by '|' that are not inside [...] to keep link intact
+        raw_cells = re.split(r"\|(?![^\[]*\])", raw)
+        cells = [c.strip() for c in raw_cells]
+        if not cells or len(cells) < 6:
+            continue
+        # first cell format: [KEY|url] Title
+        key_match = re.search(r"\[([A-Z][A-Z0-9]+-\d+)\|([^\]]+)\]\s*(.*)", cells[0])
+        if not key_match:
+            continue
+        key = key_match.group(1)
+        url = key_match.group(2)
+        title = key_match.group(3).strip()
+        stand = cells[1] if len(cells) > 1 else ""
+        kind = cells[2] if len(cells) > 2 else ""
+        short = cells[5] if len(cells) > 5 else ""
+        items.append(RNItem(key=key, title=title, url=url, stand=stand, kind=kind, short=short))
+    return items

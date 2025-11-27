@@ -30,3 +30,8 @@ TARGET_ISSUE_KEY=
 ISSUE_SHORT_TEMPLATE_PATH=prompt_templates/issue_short_summary.txt
 ISSUE_SHORT_MAX_TOKENS=300
 ISSUE_SHORT_SYSTEM_PROMPT=
+
+# Refine layer (reuses main LLM_* settings)
+REFINE_PROMPT_PATH=prompt_templates/refine_release_summary.txt
+REFINE_SYSTEM_PROMPT=
+REFINE_MAX_TOKENS=

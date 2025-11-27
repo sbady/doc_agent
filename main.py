@@ -5,12 +5,23 @@ import json
 import logging
 import os
 from typing import Any, Dict
+import re
 
 from config import AppConfig
 from jira_client import JiraClient
 from llm_client import LLMClient
 from dotenv import load_dotenv
-from release_notes import build_items, make_jira_table, update_table_section, merge_rows_preserve_manual
+from release_notes import (
+    build_items,
+    make_jira_table,
+    update_table_section,
+    merge_rows_preserve_manual,
+    parse_existing_table,
+    sanitize_issue_data,
+    normalize_short_text,
+    make_jira_table_from_items,
+    load_glossary_text,
+)
 import requests
 
 
@@ -44,9 +55,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["view", "fill"],
+        choices=["view", "fill", "refine-preview", "refine-apply"],
         default="view",
-        help="Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы в целевой задаче.",
+        help=(
+            "Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы; "
+            "refine-preview — генерация предложений улучшений; refine-apply — обновление таблицы новыми текстами."
+        ),
     )
     return parser.parse_args()
 
@@ -92,8 +106,8 @@ def main() -> int:
         logging.error("Failed to load configuration: %s", exc)
         return 1
 
-    # Branch: release notes workflow
-    if args.release_parent or config.release_parent_key:
+    # Branch: release notes workflow (including refine modes)
+    if args.release_parent or config.release_parent_key or args.mode.startswith("refine"):
         parent_key = args.release_parent or config.release_parent_key
         jira_client = JiraClient(
             base_url=config.jira_base_url,
@@ -112,33 +126,70 @@ def main() -> int:
             timeout=config.request_timeout,
             template_path=config.issue_short_template_path,
         )
-        try:
-            items = build_items(jira_client, llm_client, config, parent_key)
-        except Exception as exc:
-            logging.exception("Failed to build release notes items: %s", exc)
-            return 1
 
-        table = make_jira_table(items)
+        # --- view/fill workflow ---
+        if args.mode in {"view", "fill"}:
+            try:
+                items = build_items(jira_client, llm_client, config, parent_key)
+            except Exception as exc:
+                logging.exception("Failed to build release notes items: %s", exc)
+                return 1
 
-        if args.mode == "view":
-            print(table)
+            table = make_jira_table(items)
+
+            if args.mode == "view":
+                print(table)
+                return 0
+
+            target_key = args.release_target or config.target_issue_key
+            if not target_key:
+                logging.error("Target issue key is required in fill mode (use --release-target or TARGET_ISSUE_KEY)")
+                return 1
+
+            if "-" not in str(target_key) and parent_key and "-" in parent_key:
+                project = parent_key.split("-", 1)[0]
+                logging.info("Inferring target key from parent project: %s -> %s-%s", target_key, project, target_key)
+                target_key = f"{project}-{target_key}"
+
+            try:
+                url = f"{config.jira_base_url.rstrip('/')}/rest/api/{config.jira_api_version or '3'}/issue/{target_key}"
+                params = {"fields": "description"}
+                r2 = jira_client._session.get(url, params=params, timeout=config.request_timeout)
+                r2.raise_for_status()
+                target_payload = r2.json()
+            except Exception as exc:
+                logging.exception("Failed to fetch target issue %s: %s", target_key, exc)
+                return 1
+
+            current_desc = target_payload.get("fields", {}).get("description")
+            if not isinstance(current_desc, str):
+                logging.error("Target issue description is not a wiki string (likely ADF). Automatic fill is not supported.")
+                print(table)
+                return 1
+
+            merged_table = merge_rows_preserve_manual(current_desc, items)
+            new_desc = update_table_section(current_desc, merged_table)
+
+            try:
+                jira_client.update_issue_description(target_key, new_desc)
+            except Exception:
+                return 1
+
+            logging.info("Updated release table in %s", target_key)
+            logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
             return 0
 
-        # mode == fill
+        # --- refine workflow ---
         target_key = args.release_target or config.target_issue_key
         if not target_key:
-            logging.error("Target issue key is required in fill mode (use --release-target or TARGET_ISSUE_KEY)")
+            logging.error("Target issue key is required for refine modes (use --release-target or TARGET_ISSUE_KEY)")
             return 1
-
-        # If a numeric ID (e.g., "7382") is provided, infer project key from parent (e.g., MSP-7382)
         if "-" not in str(target_key) and parent_key and "-" in parent_key:
             project = parent_key.split("-", 1)[0]
             logging.info("Inferring target key from parent project: %s -> %s-%s", target_key, project, target_key)
             target_key = f"{project}-{target_key}"
 
-        # Fetch current description to perform idempotent merge/update
         try:
-            # Read raw description string via authenticated session
             url = f"{config.jira_base_url.rstrip('/')}/rest/api/{config.jira_api_version or '3'}/issue/{target_key}"
             params = {"fields": "description"}
             r2 = jira_client._session.get(url, params=params, timeout=config.request_timeout)
@@ -150,19 +201,99 @@ def main() -> int:
 
         current_desc = target_payload.get("fields", {}).get("description")
         if not isinstance(current_desc, str):
-            logging.error("Target issue description is not a wiki string (likely ADF). Automatic fill is not supported.")
-            print(table)
+            logging.error("Target issue description is not a wiki string (likely ADF). Refine is not supported.")
             return 1
 
-        merged_table = merge_rows_preserve_manual(current_desc, items)
-        new_desc = update_table_section(current_desc, merged_table)
+        existing_items = parse_existing_table(current_desc)
+        if not existing_items:
+            logging.error("No existing release table found to refine.")
+            return 1
 
+        glossary_text = ""
+        try:
+            glossary_text = load_glossary_text()
+        except Exception:
+            glossary_text = ""
+
+        refine_client = LLMClient(
+            endpoint=config.llm_endpoint,
+            api_key=config.llm_api_key,
+            model=config.llm_model,
+            temperature=config.llm_temperature,
+            max_tokens=config.refine_max_tokens or config.llm_max_tokens,
+            timeout=config.request_timeout,
+            template_path=config.refine_prompt_path,
+        )
+
+        refined: list[tuple[str, str, str]] = []  # (key, old, new)
+
+        for item in existing_items:
+            # Fast path: do not send "Не описываем" to LLM
+            if item.short.strip().lower() == "не описываем":
+                refined.append((item.key, item.short, item.short))
+                continue
+            try:
+                issue_data = jira_client.get_issue_data(item.key)
+            except Exception as exc:
+                logging.error("Skip %s: failed to fetch issue data: %s", item.key, exc)
+                refined.append((item.key, item.short, item.short))
+                continue
+            sanitized = sanitize_issue_data(issue_data)
+            payload = {
+                "draft": item.short,
+                "glossary": glossary_text,
+            }
+            try:
+                new_short = refine_client.generate_with_template(
+                    payload,
+                    config.refine_prompt_path,
+                    system_prompt=config.refine_system_prompt,
+                )
+                new_short = normalize_short_text(new_short)
+                if not new_short:
+                    new_short = item.short
+                # Guard: don't degrade meaningful drafts
+                if new_short.strip().lower() == "не описываем" and item.short.strip().lower() != "не описываем":
+                    new_short = item.short
+                if len(new_short) > 220:
+                    new_short = item.short
+            except Exception as exc:
+                logging.error("Refine failed for %s: %s", item.key, exc)
+                new_short = item.short
+            refined.append((item.key, item.short, new_short))
+
+        if args.mode == "refine-preview":
+            preview_path = os.path.join("docs", "release_refine_preview.md")
+            os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+            with open(preview_path, "w", encoding="utf-8") as f:
+                for idx, (key, old, new) in enumerate(refined, 1):
+                    f.write(f"{idx}) {key}\nOLD: {old}\nNEW: {new}\n----\n")
+            logging.info("Refine preview saved to %s", preview_path)
+            return 0
+
+        # apply
+        updated_items = []
+        new_map = {key: new for key, _, new in refined}
+        for item in existing_items:
+            updated_items.append(
+                type(item)(
+                    key=item.key,
+                    title=item.title,
+                    url=item.url,
+                    stand=item.stand,
+                    kind=item.kind,
+                    short=new_map.get(item.key, item.short),
+                )
+            )
+
+        new_table = make_jira_table_from_items(updated_items, preserve_order=True)
+        new_desc = update_table_section(current_desc, new_table)
         try:
             jira_client.update_issue_description(target_key, new_desc)
         except Exception:
             return 1
-
-        logging.info("Updated release table in %s", target_key)
+        logging.info("Applied refined descriptions to %s", target_key)
+        logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
         return 0
 
     # Default branch: single issue summary (existing behavior)
@@ -210,6 +341,7 @@ def main() -> int:
     else:
         print(summary)
 
+    logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
     return 0
 
 
