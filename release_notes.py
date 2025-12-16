@@ -188,6 +188,10 @@ def normalize_short_text(text: str) -> str:
     if text is None:
         return ""
     t = str(text).replace("\r", " ")
+    # Drop meta prefixes sometimes returned by chat models
+    t = re.sub(r"(?i)^(?:вывод|ответ|результат|final answer|result)\s*:\s*", "", t).strip()
+    # Normalize common "1-1" phrasing for chats
+    t = re.sub(r"\b1\s*[-–—]\s*1\b", "1 на 1", t)
     replacements = {
         "«": '"', "»": '"',
         "“": '"', "”": '"', "„": '"', "‟": '"',
@@ -195,6 +199,9 @@ def normalize_short_text(text: str) -> str:
     }
     for src, dst in replacements.items():
         t = t.replace(src, dst)
+    # Avoid hard-to-read "две части через тире/дефис" by splitting into sentences
+    t = re.sub(r"\s[—–]\s+", ". ", t)
+    t = re.sub(r"\s-\s+", ". ", t)
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r'(["]?)\s*(?:\.{1,3}|…)\s*$', r"\1", t)
     t = t.strip()
