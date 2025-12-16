@@ -67,12 +67,15 @@ class LLMClient:
     def generate_with_template(self, issue_payload: Dict[str, Any], template_path: Path, *, system_prompt: Optional[str] = None) -> str:
         template_text = template_path.read_text(encoding="utf-8")
         template = Template(template_text)
-        prompt = template.render(
-            title=issue_payload.get("title", ""),
-            description=issue_payload.get("description", ""),
-            comments=issue_payload.get("comments", []),
-            issue_type=issue_payload.get("issue_type", ""),
-        )
+        context: Dict[str, Any] = dict(issue_payload or {})
+        # Common defaults for templates used across the project
+        context.setdefault("title", "")
+        context.setdefault("description", "")
+        context.setdefault("comments", [])
+        context.setdefault("issue_type", "")
+        context.setdefault("draft", "")
+        context.setdefault("glossary", "")
+        prompt = template.render(**context)
         self._add_prompt_chars(len(prompt))
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
         prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""

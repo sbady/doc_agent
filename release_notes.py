@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,6 +75,10 @@ def map_issue_type_to_kind(issue_type_name: str) -> str:
 # ----------------------------
 
 _URL_PATTERN = re.compile(r"https?://[^\s)>\]]+")
+_HOST_PATTERN = re.compile(
+    r"\b[\w.-]+\.(?:local|internal|lan|mashroom\.online|pikemedia\.live|pikemedia\.ru|gitlab[\w.-]*|dev|test)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _strip_url(url: str) -> str:
@@ -85,8 +90,29 @@ def _strip_url(url: str) -> str:
     return url
 
 
-def clean_text(text: Any) -> str:
-    """Mask sensitive tokens but keep contextual info."""
+def _scrub_logs_strict(t: str) -> str:
+    """Hard scrub server/request/upstream/host and log-like lines."""
+    lines = []
+    for line in t.splitlines():
+        low = line.lower()
+        if (
+            "request:" in low
+            or "upstream" in low
+            or "server:" in low
+            or "host:" in low
+            or re.search(r"\b(get|post|put|delete|patch)\s+/[^\s]*\s+http/\d", low)
+        ):
+            lines.append("<redacted_log>")
+            continue
+        lines.append(line)
+    t = "\n".join(lines)
+    # Remove remaining server/request/upstream/host fragments if any
+    t = re.sub(r"(?i)(server|request|upstream|host)\s*:[^,\n]+", r"\1:<redacted>", t)
+    return t
+
+
+def clean_text(text: Any, *, mode: str = "strict") -> str:
+    """Mask sensitive tokens; mode 'strict' removes logs/hosts more aggressively."""
     if text is None:
         return ""
     t = str(text)
@@ -101,25 +127,45 @@ def clean_text(text: Any) -> str:
     # Mask long base64-ish tokens after Basic even without header word
     t = re.sub(r"(?i)Basic\s+[A-Za-z0-9+/=]{8,}", "Basic <redacted>", t)
     # Mask long hex/base64-like chunks (>=20 chars) often used as tokens/keys
-    t = re.sub(r"\b[A-Za-z0-9+/=]{20,}\b", "<redacted>", t)
+    t = re.sub(r"\b[A-Za-z0-9+/=]{20,}\b", "<redacted_id>", t)
     # Mask emails / phones / IPs
     t = re.sub(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<redacted_email>", t)
-    t = re.sub(r"\b\+?\d[\d\s().-]{6,}\b", "<redacted_phone>", t)
     t = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<redacted_ip>", t)
     # Strip query from URLs but keep domain/path
     t = _URL_PATTERN.sub(lambda m: _strip_url(m.group(0)), t)
+
+    # Mask explicit merge_request/issue ids early to avoid phone-regex collisions
+    t = re.sub(r"(?i)(merge_requests|issues)/\d+", r"\1/<redacted_id>", t)
+
+    if mode == "strict":
+        # Remove internal hosts and gitlab/dev/test domains
+        t = _HOST_PATTERN.sub("<redacted_host>", t)
+        # Mask id-like params
+        t = re.sub(
+            r"(?i)(viewerid|activityid|browserid|conferenceid|token|key|hash)=([A-Za-z0-9\-]+)",
+            lambda m: f"{m.group(1)}=<redacted_id>",
+            t,
+        )
+        # Remove code blocks (SQL / curl etc.)
+        t = re.sub(r"\{code[:\w]*\}.*?\{code\}", "<redacted_code>", t, flags=re.DOTALL | re.IGNORECASE)
+        t = re.sub(r"```.*?```", "<redacted_code>", t, flags=re.DOTALL)
+        # Scrub log lines/server/request/upstream
+        t = _scrub_logs_strict(t)
+
+    # Phone: exclude dotted version-like patterns and numeric URL tails already masked
+    t = re.sub(r"\b\+?\d[\d\s()/-]{6,}\b", "<redacted_phone>", t)
     # Limit very long blobs
     if len(t) > 6000:
         t = t[:6000] + " <truncated>"
     return t.strip()
 
 
-def sanitize_issue_data(issue: Dict[str, Any]) -> Dict[str, Any]:
+def sanitize_issue_data(issue: Dict[str, Any], mode: str = "strict") -> Dict[str, Any]:
     return {
-        "title": clean_text(issue.get("title", "")),
-        "description": clean_text(issue.get("description", "")),
-        "comments": [clean_text(c) for c in issue.get("comments", [])],
-        "issue_type": clean_text(issue.get("issue_type", "")),
+        "title": clean_text(issue.get("title", ""), mode=mode),
+        "description": clean_text(issue.get("description", ""), mode=mode),
+        "comments": [clean_text(c, mode=mode) for c in issue.get("comments", [])],
+        "issue_type": clean_text(issue.get("issue_type", ""), mode=mode),
     }
 
 
@@ -171,6 +217,16 @@ def generate_short_description(llm: LLMClient, payload: Dict[str, Any], template
         return "не описываем"
 
 
+def select_issue_short_template(cfg: AppConfig, *, kind: str) -> Any:
+    """Select short-description template for the release table."""
+    # Backward-compatible override: single template for both kinds.
+    if getattr(cfg, "issue_short_template_path", None):
+        return cfg.issue_short_template_path
+    if kind == "Баг":
+        return cfg.issue_short_bug_template_path
+    return cfg.issue_short_feature_template_path
+
+
 def fetch_related_issue_keys(jira: JiraClient, parent_key: str) -> List[str]:
     url = f"{jira._base_url}/rest/api/{jira._api_version or '3'}/issue/{parent_key}"
     params = {"fields": "issuelinks"}
@@ -218,11 +274,12 @@ def build_items(jira: JiraClient, llm: LLMClient, cfg: AppConfig, parent_key: st
             continue
 
         issue_data = jira.get_issue_data(key)
-        sanitized_issue = sanitize_issue_data(issue_data)
+        sanitized_issue = sanitize_issue_data(issue_data, mode=getattr(cfg, "sanitizer_mode", "strict"))
         sanitized_issue["glossary"] = glossary_text
         stand, _ = extract_stand_from_description(issue_data.get("description", ""))
         kind = map_issue_type_to_kind(issuetype)
-        short = generate_short_description(llm, sanitized_issue, cfg.issue_short_template_path, system_prompt=cfg.issue_short_system_prompt)
+        short_template = select_issue_short_template(cfg, kind=kind)
+        short = generate_short_description(llm, sanitized_issue, short_template, system_prompt=cfg.issue_short_system_prompt)
 
         url = f"{jira._base_url}/browse/{key}"
         items.append(RNItem(key=key, title=issue_data.get("title", ""), url=url, stand=stand, kind=kind, short=short))

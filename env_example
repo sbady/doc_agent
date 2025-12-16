@@ -27,7 +27,11 @@ LOG_LEVEL=INFO
 # Release notes workflow
 RELEASE_PARENT_KEY=
 TARGET_ISSUE_KEY=
-ISSUE_SHORT_TEMPLATE_PATH=prompt_templates/issue_short_summary.txt
+# Release table short descriptions
+# If ISSUE_SHORT_TEMPLATE_PATH is set, it overrides both feature/bug templates.
+ISSUE_SHORT_TEMPLATE_PATH=
+ISSUE_SHORT_FEATURE_TEMPLATE_PATH=prompt_templates/issue_short_summary_feature.txt
+ISSUE_SHORT_BUG_TEMPLATE_PATH=prompt_templates/issue_short_summary_bug.txt
 ISSUE_SHORT_MAX_TOKENS=300
 ISSUE_SHORT_SYSTEM_PROMPT=
 
@@ -35,3 +39,7 @@ ISSUE_SHORT_SYSTEM_PROMPT=
 REFINE_PROMPT_PATH=prompt_templates/refine_release_summary.txt
 REFINE_SYSTEM_PROMPT=
 REFINE_MAX_TOKENS=
+
+# Sanitizer
+# Options: strict (по умолчанию, агрессивно чистит логи/хосты) | soft (минимальная маскировка)
+SANITIZER_MODE=strict

@@ -124,7 +124,7 @@ def main() -> int:
             temperature=config.llm_temperature,
             max_tokens=config.issue_short_max_tokens or config.llm_max_tokens,
             timeout=config.request_timeout,
-            template_path=config.issue_short_template_path,
+            template_path=config.issue_short_template_path or config.issue_short_feature_template_path,
         )
 
         # --- view/fill workflow ---
@@ -238,7 +238,7 @@ def main() -> int:
                 logging.error("Skip %s: failed to fetch issue data: %s", item.key, exc)
                 refined.append((item.key, item.short, item.short))
                 continue
-            sanitized = sanitize_issue_data(issue_data)
+            sanitized = sanitize_issue_data(issue_data, mode=config.sanitizer_mode)
             payload = {
                 "draft": item.short,
                 "glossary": glossary_text,

@@ -64,7 +64,8 @@ def main() -> int:
         print(f"Failed to fetch issue {issue_key}: {exc}")
         return 1
 
-    sanitized = sanitize_issue_data(raw_issue)
+    sanitizer_mode = os.getenv("SANITIZER_MODE", "strict")
+    sanitized = sanitize_issue_data(raw_issue, mode=sanitizer_mode)
     changes = compare_fields(raw_issue, sanitized)
 
     if not changes:
