@@ -199,9 +199,6 @@ def normalize_short_text(text: str) -> str:
     }
     for src, dst in replacements.items():
         t = t.replace(src, dst)
-    # Avoid hard-to-read "две части через тире/дефис" by splitting into sentences
-    t = re.sub(r"\s[—–]\s+", ". ", t)
-    t = re.sub(r"\s-\s+", ". ", t)
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r'(["]?)\s*(?:\.{1,3}|…)\s*$', r"\1", t)
     t = t.strip()
