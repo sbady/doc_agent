@@ -59,3 +59,15 @@
 ## Ограничения
 
 - `fill/refine-*` работают только если описание задачи в Jira доступно как wiki‑строка (Jira Server/DC). Для Jira Cloud (ADF) требуется отдельная реализация обновления описания.
+
+python main.py --issue-short MSP-7927
+
+python main.py --mode fill --log-level DEBUG
+
+python main.py --mode fill-preview --log-level DEBUG
+
+python main.py --mode refine-preview --log-level DEBUG
+
+python main.py --mode refine-apply --log-level DEBUG
+
+python scripts/check_sanitizer.py MSP-8440 

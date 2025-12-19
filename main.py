@@ -21,6 +21,9 @@ from release_notes import (
     normalize_short_text,
     make_jira_table_from_items,
     load_glossary_text,
+    map_issue_type_to_kind,
+    select_issue_short_template,
+    generate_short_description,
 )
 import requests
 
@@ -44,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Logging level (DEBUG, INFO, WARNING, ERROR). Overrides LOG_LEVEL from .env if set.",
     )
+    parser.add_argument(
+        "--issue-short",
+        action="store_true",
+        help="Сгенерировать одну строку для релиз-таблицы по указанной задаче и вывести в консоль.",
+    )
     # Release notes workflow args
     parser.add_argument(
         "--release-parent",
@@ -55,12 +63,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["view", "fill", "refine-preview", "refine-apply"],
+        choices=["view", "fill", "fill-preview", "refine-preview", "refine-apply"],
         default="view",
         help=(
-            "Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы; "
+            "Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы; fill-preview — прогон без записи; "
             "refine-preview — генерация предложений улучшений; refine-apply — обновление таблицы новыми текстами."
         ),
+    )
+    parser.add_argument(
+        "--preview-path",
+        default=None,
+        help="Путь файла для режима fill-preview (файл будет создан или перезаписан).",
     )
     return parser.parse_args()
 
@@ -106,6 +119,61 @@ def main() -> int:
         logging.error("Failed to load configuration: %s", exc)
         return 1
 
+    # One-issue short release note line (uses the same templates as release table generation)
+    if args.issue_short:
+        try:
+            issue_key = read_issue_key(args)
+        except ValueError as exc:
+            logging.error("%s", exc)
+            return 1
+
+        jira_client = JiraClient(
+            base_url=config.jira_base_url,
+            email=config.jira_email,
+            api_token=config.jira_api_token,
+            auth_type=config.jira_auth_type,
+            api_version=config.jira_api_version,
+            timeout=config.request_timeout,
+        )
+        llm_client = LLMClient(
+            endpoint=config.llm_endpoint,
+            api_key=config.llm_api_key,
+            model=config.llm_model,
+            temperature=config.llm_temperature,
+            max_tokens=config.issue_short_max_tokens or config.llm_max_tokens,
+            timeout=config.request_timeout,
+            template_path=config.issue_short_template_path or config.issue_short_feature_template_path,
+        )
+
+        try:
+            issue_data = jira_client.get_issue_data(issue_key)
+        except Exception as exc:
+            logging.exception("Failed to fetch Jira issue data: %s", exc)
+            return 1
+
+        payload = sanitize_issue_data(issue_data, mode=config.sanitizer_mode)
+        try:
+            payload["glossary"] = load_glossary_text()
+        except Exception:
+            payload["glossary"] = ""
+
+        kind = map_issue_type_to_kind(issue_data.get("issue_type", ""))
+        template_path = select_issue_short_template(config, kind=kind)
+        try:
+            short = generate_short_description(
+                llm_client,
+                payload,
+                template_path,
+                system_prompt=config.issue_short_system_prompt,
+            )
+        except Exception as exc:
+            logging.error("Failed to generate short description: %s", exc)
+            return 1
+
+        print(short)
+        logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
+        return 0
+
     # Branch: release notes workflow (including refine modes)
     if args.release_parent or config.release_parent_key or args.mode.startswith("refine"):
         parent_key = args.release_parent or config.release_parent_key
@@ -127,8 +195,8 @@ def main() -> int:
             template_path=config.issue_short_template_path or config.issue_short_feature_template_path,
         )
 
-        # --- view/fill workflow ---
-        if args.mode in {"view", "fill"}:
+        # --- view/fill/fill-preview workflow ---
+        if args.mode in {"view", "fill", "fill-preview"}:
             try:
                 items = build_items(jira_client, llm_client, config, parent_key)
             except Exception as exc:
@@ -139,6 +207,16 @@ def main() -> int:
 
             if args.mode == "view":
                 print(table)
+                return 0
+
+            if args.mode == "fill-preview":
+                preview_path = args.preview_path or os.path.join("docs", "release_fill_preview.md")
+                os.makedirs(os.path.dirname(preview_path), exist_ok=True)
+                with open(preview_path, "w", encoding="utf-8") as f:
+                    for item in items:
+                        f.write(f"{item.key} {item.title}:\n{item.short}\n\n")
+                logging.info("Fill preview saved to %s", preview_path)
+                logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
                 return 0
 
             target_key = args.release_target or config.target_issue_key
@@ -329,6 +407,10 @@ def main() -> int:
     )
 
     try:
+        if not config.prompt_template_path.exists():
+            raise FileNotFoundError(
+                f"Prompt template not found: {config.prompt_template_path} (set PROMPT_TEMPLATE_PATH in .env)"
+            )
         payload = build_issue_payload(issue_data)
         summary = llm_client.generate_summary(payload)
     except Exception as exc:

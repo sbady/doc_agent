@@ -67,10 +67,10 @@ class AppConfig:
 
         jira_api_version = os.getenv("JIRA_API_VERSION", "3").strip() or "3"
 
-        prompt_path_env = os.getenv("PROMPT_TEMPLATE_PATH", "prompt_templates/release_summary.txt")
+        prompt_path_env = (os.getenv("PROMPT_TEMPLATE_PATH") or "").strip()
+        if not prompt_path_env:
+            prompt_path_env = "prompt_templates/release_summary.txt"
         prompt_template_path = cls._resolve_path(prompt_path_env)
-        if not prompt_template_path.exists():
-            raise FileNotFoundError(f"Prompt template not found: {prompt_template_path}")
 
         llm_api_key = os.getenv("LLM_API_KEY")
         llm_model = os.getenv("LLM_MODEL")
