@@ -131,6 +131,19 @@ class JiraClient:
             logger.error("Failed to update %s: %s | Body: %s", issue_key, exc, response.text[:300])
             raise
 
+    def add_issue_comment(self, issue_key: str, body: str) -> None:
+        """Add a comment to an issue (wiki string body for Server/DC)."""
+        version_segment = self._api_version or "3"
+        url = f"{self._base_url}/rest/api/{version_segment}/issue/{issue_key}/comment"
+        payload = {"body": body or ""}
+        logger.info("Adding comment to %s (length=%d)", issue_key, len(body or ""))
+        response = self._session.post(url, json=payload, timeout=self._timeout)
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            logger.error("Failed to add comment to %s: %s | Body: %s", issue_key, exc, response.text[:300])
+            raise
+
     def _extract_comments(self, comments: List[Dict[str, Any]]) -> List[str]:
         extracted: List[str] = []
         for comment in comments:

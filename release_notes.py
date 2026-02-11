@@ -12,6 +12,9 @@ from llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
+RELEASE_TABLE_HEADER_LINE = "||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||"
+_TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
+
 
 # ----------------------------
 # Data model
@@ -441,3 +444,274 @@ def parse_existing_table(current_desc: str) -> List[RNItem]:
         short = cells[5] if len(cells) > 5 else ""
         items.append(RNItem(key=key, title=title, url=url, stand=stand, kind=kind, short=short))
     return items
+
+
+def _split_table_row_cells(raw: str) -> List[str]:
+    # Split by unescaped pipes that are not inside [...] (to keep Jira link intact).
+    return re.split(r"(?<!\\)\|(?![^\[]*\])", raw)
+
+
+def _collect_table_rows(lines: List[str], start_idx: int) -> tuple[List[tuple[int, int, str]], int]:
+    """Collect wiki table rows starting at start_idx (header_idx + 1).
+
+    Supports rows that span multiple physical lines until a line ending with '|'. Returns:
+    - rows: list of (start_line_idx, end_line_idx_exclusive, row_text_with_newlines)
+    - end_idx: first line index after the table rows
+    """
+    rows: List[tuple[int, int, str]] = []
+    i = start_idx
+    in_row = False
+    row_start = -1
+    buf: List[str] = []
+
+    while i < len(lines):
+        ln = lines[i]
+        if not in_row:
+            if ln.lstrip().startswith("|"):
+                in_row = True
+                row_start = i
+                buf = [ln]
+                if ln.rstrip().endswith("|"):
+                    rows.append((row_start, i + 1, "\n".join(buf)))
+                    in_row = False
+                    buf = []
+                    row_start = -1
+                i += 1
+                continue
+            break
+
+        # continuation line inside a multi-line row
+        if i != row_start:
+            buf.append(ln)
+        if ln.rstrip().endswith("|"):
+            rows.append((row_start, i + 1, "\n".join(buf)))
+            in_row = False
+            buf = []
+            row_start = -1
+        i += 1
+
+    # If the row is unterminated, we ignore it (table is malformed).
+    return rows, i
+
+
+def _row_text_to_cells(row_text: str) -> List[str]:
+    raw = re.sub(r"^\s*\|", "", row_text, count=1)
+    raw = re.sub(r"\|\s*$", "", raw)
+    return [c.strip() for c in _split_table_row_cells(raw)]
+
+
+def _cells_to_single_line_row(cells: List[str]) -> str:
+    # Encode line breaks inside cells as '\\\\' so the table stays stable.
+    normalized = [(c or "").replace("\r", "").replace("\n", "\\\\").strip() for c in cells]
+    return "|" + "|".join(normalized) + "|"
+
+
+def _extract_issue_key_from_task_cell(cell: str) -> Optional[str]:
+    m = re.search(r"\[([A-Z][A-Z0-9]+-\d+)\|", cell or "")
+    return m.group(1) if m else None
+
+
+def _next_generated_index(existing_short: str) -> int:
+    # Find max N in "_Сгенерировано #N:_" blocks; also treat unnumbered as N=1.
+    if not existing_short:
+        return 1
+    nums = [int(x) for x in re.findall(r"_Сгенерировано\s*#(\d+)\s*:_", existing_short)]
+    if re.search(r"_Сгенерировано\s*:_", existing_short):
+        nums.append(1)
+    return (max(nums) + 1) if nums else 1
+
+
+def append_generated_to_short_cell(
+    existing_short: str,
+    generated_short: str,
+    *,
+    mode: str,
+    run_index: Optional[int] = None,
+) -> str:
+    """Append/replace generated text under the baseline in a Jira table cell.
+
+    The cell content must stay a single line; line breaks inside a Jira table cell are encoded as '\\\\'.
+    """
+    # Prefer human-readable newlines in the cell. Also normalize past runs that used '\\\\' as a line-break marker.
+    baseline = (existing_short or "").replace("\\\\", "\n").strip()
+    gen = (generated_short or "").strip()
+    if not gen:
+        return baseline
+
+    if mode not in {"replace", "append"}:
+        raise ValueError("mode must be 'replace' or 'append'")
+
+    if mode == "replace":
+        # Keep everything before the first generated marker, if present.
+        marker = re.search(r"(?:^|\n)_Сгенерировано(?:\s*#\d+)?\s*:_", baseline)
+        if marker:
+            baseline = baseline[: marker.start()].rstrip()
+        label = "_Сгенерировано:_"
+        return f"{baseline}\n{label}\n{gen}".strip() if baseline else f"{label}\n{gen}".strip()
+
+    # append
+    idx = run_index if run_index is not None else _next_generated_index(baseline)
+    label = f"_Сгенерировано #{idx}:_"
+    if not baseline:
+        return f"{label}\n{gen}".strip()
+    return f"{baseline}\n{label}\n{gen}".strip()
+
+
+def update_release_table_generated_column(
+    current_desc: str,
+    *,
+    generated_by_key: Dict[str, str],
+    mode: str,
+) -> tuple[str, int, Optional[int]]:
+    """Update only 'Краткое описание' column for existing rows; never adds new rows.
+
+    Returns (new_description, updated_rows_count, run_index_if_append).
+    """
+    lines = (current_desc or "").splitlines()
+    header_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == RELEASE_TABLE_HEADER_LINE:
+            header_idx = i
+            break
+    if header_idx is None:
+        return current_desc or "", 0, None
+
+    rows, table_end_idx = _collect_table_rows(lines, header_idx + 1)
+
+    # In append mode, use one global run index across all rows.
+    run_index: Optional[int] = None
+    if mode == "append":
+        max_existing = 0
+        for _, _, row_text in rows:
+            cells = _row_text_to_cells(row_text)
+            if len(cells) < 6:
+                continue
+            existing_short = (cells[5] or "").replace("\n", "\\\\")
+            next_i = _next_generated_index(existing_short)
+            max_existing = max(max_existing, next_i - 1)
+        run_index = max_existing + 1
+
+    updated = 0
+    new_row_blocks: List[str] = []
+    for _, _, row_text in rows:
+        cells = _row_text_to_cells(row_text)
+        if len(cells) < 6:
+            new_row_blocks.append(row_text.rstrip("\n"))
+            continue
+        key = _extract_issue_key_from_task_cell(cells[0])
+        if not key or key not in generated_by_key:
+            new_row_blocks.append(row_text.rstrip("\n"))
+            continue
+        cells[5] = append_generated_to_short_cell(
+            cells[5],
+            generated_by_key[key],
+            mode=mode,
+            run_index=run_index,
+        )
+        new_row_blocks.append(("|" + "|".join(cells) + "|").rstrip("\n"))
+        updated += 1
+
+    out_lines = lines[: header_idx + 1] + new_row_blocks + lines[table_end_idx:]
+    return "\n".join(out_lines) + ("\n" if (current_desc or "").endswith("\n") else ""), updated, run_index
+
+
+def extract_release_table_issue_keys(desc: str) -> List[str]:
+    """Return keys present in the release table rows (order preserved)."""
+    lines = (desc or "").splitlines()
+    header_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == RELEASE_TABLE_HEADER_LINE:
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+    rows, _ = _collect_table_rows(lines, header_idx + 1)
+    keys: List[str] = []
+    for _, _, row_text in rows:
+        cells = _row_text_to_cells(row_text)
+        if not cells:
+            continue
+        k = _extract_issue_key_from_task_cell(cells[0])
+        if k:
+            keys.append(k)
+    return list(dict.fromkeys(keys))
+
+
+def extract_release_table_text(desc: str) -> str:
+    """Extract just the release table (header + rows) from a wiki description."""
+    lines = (desc or "").splitlines()
+    header_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == RELEASE_TABLE_HEADER_LINE:
+            header_idx = i
+            break
+    if header_idx is None:
+        return ""
+    _, table_end_idx = _collect_table_rows(lines, header_idx + 1)
+    # Include the h2 heading line if present directly above.
+    start = header_idx
+    if header_idx > 0 and re.match(r"(?mi)^h2\.\s*Таблица релиза", lines[header_idx - 1] or ""):
+        start = header_idx - 1
+    return "\n".join(lines[start:table_end_idx]).strip()
+
+
+def upsert_judge_panel(desc: str, report_text: str, *, mode: str, run_index: Optional[int]) -> str:
+    """Insert judge report under the release table as a Jira wiki panel."""
+    if not report_text:
+        return desc or ""
+
+    title = "Оценка соответствия (LLM)"
+    if mode == "append" and run_index:
+        title = f"{title} #{run_index}"
+
+    panel_start = f"{{panel:title={title}}}"
+    panel_end = "{panel}"
+
+    lines = (desc or "").splitlines()
+    # Find table end to insert right below.
+    header_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == RELEASE_TABLE_HEADER_LINE:
+            header_idx = i
+            break
+    if header_idx is None:
+        # No table: append at end.
+        base = (desc or "").rstrip()
+        return f"{base}\n\n{panel_start}\n{report_text.strip()}\n{panel_end}\n"
+
+    _, row_end = _collect_table_rows(lines, header_idx + 1)
+
+    # replace mode: remove existing panels with the same base title (any #N)
+    new_lines = list(lines)
+    if mode == "replace":
+        base_title_prefix = "{panel:title=Оценка соответствия (LLM)"
+        i = 0
+        while i < len(new_lines):
+            if new_lines[i].startswith(base_title_prefix):
+                # remove until closing {panel}
+                j = i + 1
+                while j < len(new_lines) and new_lines[j].strip() != panel_end:
+                    j += 1
+                if j < len(new_lines):
+                    j += 1
+                del new_lines[i:j]
+                continue
+            i += 1
+
+        # Recompute insertion point after deletion
+        header_idx2 = None
+        for k, ln in enumerate(new_lines):
+            if ln.strip() == RELEASE_TABLE_HEADER_LINE:
+                header_idx2 = k
+                break
+        if header_idx2 is None:
+            base = "\n".join(new_lines).rstrip()
+            return f"{base}\n\n{panel_start}\n{report_text.strip()}\n{panel_end}\n"
+        _, row_end = _collect_table_rows(new_lines, header_idx2 + 1)
+
+    insertion = [panel_start, report_text.strip(), panel_end]
+    # Ensure a blank line before the panel for readability.
+    if row_end < len(new_lines) and new_lines[row_end].strip() != "":
+        insertion = [""] + insertion
+    out = new_lines[:row_end] + insertion + new_lines[row_end:]
+    return "\n".join(out) + ("\n" if (desc or "").endswith("\n") else "")

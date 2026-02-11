@@ -24,6 +24,10 @@ from release_notes import (
     map_issue_type_to_kind,
     select_issue_short_template,
     generate_short_description,
+    update_release_table_generated_column,
+    extract_release_table_text,
+    upsert_judge_panel,
+    extract_release_table_issue_keys,
 )
 import requests
 
@@ -63,10 +67,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["view", "fill", "fill-preview", "refine-preview", "refine-apply"],
+        choices=["view", "fill", "fill-preview", "compare", "refine-preview", "refine-apply"],
         default="view",
         help=(
             "Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы; fill-preview — прогон без записи; "
+            "compare — дописать сгенерированные формулировки под эталонами и добавить анализ LLM-судьи; "
             "refine-preview — генерация предложений улучшений; refine-apply — обновление таблицы новыми текстами."
         ),
     )
@@ -74,6 +79,17 @@ def parse_args() -> argparse.Namespace:
         "--preview-path",
         default=None,
         help="Путь файла для режима fill-preview (файл будет создан или перезаписан).",
+    )
+    parser.add_argument(
+        "--compare-mode",
+        choices=["replace", "append"],
+        default="replace",
+        help="Как заполнять блоки '_Сгенерировано:_' в колонке 'Краткое описание': replace — заменять; append — сохранять историю с нумерацией.",
+    )
+    parser.add_argument(
+        "--skip-judge",
+        action="store_true",
+        help="Для режима compare: не вызывать LLM-судью и не добавлять анализ под таблицей.",
     )
     return parser.parse_args()
 
@@ -254,6 +270,137 @@ def main() -> int:
                 return 1
 
             logging.info("Updated release table in %s", target_key)
+            logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
+            return 0
+
+        # --- compare workflow ---
+        if args.mode == "compare":
+            target_key = args.release_target or config.target_issue_key
+            if not target_key:
+                logging.error("Target issue key is required for compare mode (use --release-target or TARGET_ISSUE_KEY)")
+                return 1
+            if "-" not in str(target_key) and parent_key and "-" in parent_key:
+                project = parent_key.split("-", 1)[0]
+                logging.info("Inferring target key from parent project: %s -> %s-%s", target_key, project, target_key)
+                target_key = f"{project}-{target_key}"
+
+            try:
+                url = f"{config.jira_base_url.rstrip('/')}/rest/api/{config.jira_api_version or '3'}/issue/{target_key}"
+                params = {"fields": "description"}
+                r2 = jira_client._session.get(url, params=params, timeout=config.request_timeout)
+                r2.raise_for_status()
+                target_payload = r2.json()
+            except Exception as exc:
+                logging.exception("Failed to fetch target issue %s: %s", target_key, exc)
+                return 1
+
+            current_desc = target_payload.get("fields", {}).get("description")
+            if not isinstance(current_desc, str):
+                logging.error("Target issue description is not a wiki string (likely ADF). Compare is not supported.")
+                return 1
+
+            table_keys_ordered = extract_release_table_issue_keys(current_desc)
+            if not table_keys_ordered:
+                logging.error("Release table not found or has no parsable rows in target issue description.")
+                return 1
+            keys_to_generate = table_keys_ordered
+            logging.info("Compare: table_keys=%d (generating only for table rows)", len(keys_to_generate))
+
+            glossary_text = ""
+            try:
+                glossary_text = load_glossary_text()
+            except Exception:
+                glossary_text = ""
+
+            generated_by_key: Dict[str, str] = {}
+            for key in keys_to_generate:
+                try:
+                    issue_data = jira_client.get_issue_data(key)
+                except Exception as exc:
+                    logging.error("Skip %s: failed to fetch issue data: %s", key, exc)
+                    continue
+                sanitized = sanitize_issue_data(issue_data, mode=config.sanitizer_mode)
+                sanitized["glossary"] = glossary_text
+                kind = map_issue_type_to_kind(issue_data.get("issue_type", ""))
+                template_path = select_issue_short_template(config, kind=kind)
+                try:
+                    short = generate_short_description(
+                        llm_client,
+                        sanitized,
+                        template_path,
+                        system_prompt=config.issue_short_system_prompt,
+                    )
+                except Exception as exc:
+                    logging.error("Skip %s: failed to generate short: %s", key, exc)
+                    continue
+                generated_by_key[key] = short
+
+            updated_desc, updated_rows, run_index = update_release_table_generated_column(
+                current_desc,
+                generated_by_key=generated_by_key,
+                mode=args.compare_mode,
+            )
+            if updated_rows == 0:
+                logging.warning("No matching rows updated (table missing or no intersecting issue keys).")
+
+            judge_report = ""
+            if not args.skip_judge:
+                table_text = extract_release_table_text(updated_desc)
+                if not table_text:
+                    logging.error("Release table not found in target issue description; cannot run judge.")
+                    return 1
+
+                judge_prompt_path = os.getenv("JUDGE_PROMPT_PATH") or "prompt_templates/judge_release_table.txt"
+                judge_prompt_path = AppConfig._resolve_path(judge_prompt_path)  # type: ignore[attr-defined]
+                judge_system_prompt = os.getenv("JUDGE_SYSTEM_PROMPT") or None
+                judge_max_tokens_env = os.getenv("JUDGE_MAX_TOKENS") or ""
+                judge_max_tokens = None
+                if judge_max_tokens_env.strip():
+                    try:
+                        judge_max_tokens = int(judge_max_tokens_env.strip())
+                    except Exception:
+                        judge_max_tokens = None
+
+                judge_client = LLMClient(
+                    endpoint=config.llm_endpoint,
+                    api_key=config.llm_api_key,
+                    model=config.llm_model,
+                    temperature=min(config.llm_temperature, 0.2),
+                    max_tokens=judge_max_tokens or (config.llm_max_tokens or 800),
+                    timeout=config.request_timeout,
+                    template_path=judge_prompt_path,
+                )
+                try:
+                    judge_report = judge_client.generate_with_template(
+                        {"table": table_text},
+                        judge_prompt_path,
+                        system_prompt=judge_system_prompt,
+                    )
+                    judge_report = (judge_report or "").strip()
+                except Exception as exc:
+                    logging.error("Judge LLM failed: %s", exc)
+                    judge_report = (
+                        "LLM‑судья не смог выполнить оценку (ошибка/таймаут).\n"
+                        "Попробуйте увеличить REQUEST_TIMEOUT или запустить с --skip-judge."
+                    )
+
+            # Always update the table in description; judge output goes to a comment.
+            try:
+                jira_client.update_issue_description(target_key, updated_desc)
+            except Exception:
+                return 1
+
+            if judge_report:
+                title = "Оценка соответствия (LLM)"
+                if args.compare_mode == "append" and run_index:
+                    title = f"{title} #{run_index}"
+                comment_body = f"h3. {title}\n\n{judge_report.strip()}\n"
+                try:
+                    jira_client.add_issue_comment(target_key, comment_body)
+                except Exception as exc:
+                    logging.error("Failed to add judge comment to %s: %s", target_key, exc)
+
+            logging.info("Compare applied to %s: updated_rows=%d, mode=%s, run_index=%s", target_key, updated_rows, args.compare_mode, run_index)
             logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
             return 0
 
