@@ -70,9 +70,10 @@ streamlit run ui/app.py
 
 Что есть в UI сейчас:
 - обзор процесса актуализации документации;
+- заполнение релизной таблицы в Jira;
+- генерация готового changelog-текста для вставки в исходный код документации;
 - генерация одной релизной строки;
 - preview релизной таблицы без записи в Jira;
-- заполнение релизной таблицы в Jira;
 - compare эталон vs сгенерированное;
 - проверка санитайзера;
 - сканирование документации на стоп-слова;
@@ -83,6 +84,8 @@ streamlit run ui/app.py
 python main.py --issue-short MSP-7401
 
 python main.py --mode fill --log-level DEBUG
+
+python main.py --mode changelog-preview --release-target MSP-8676 --log-level DEBUG
 
 python main.py --mode fill-preview --log-level DEBUG
 

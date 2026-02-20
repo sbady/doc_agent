@@ -28,6 +28,7 @@ from release_notes import (
     extract_release_table_text,
     upsert_judge_panel,
     extract_release_table_issue_keys,
+    make_doc_changelog_from_description,
 )
 import requests
 
@@ -67,11 +68,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["view", "fill", "fill-preview", "compare", "refine-preview", "refine-apply"],
+        choices=["view", "fill", "fill-preview", "compare", "changelog-preview", "refine-preview", "refine-apply"],
         default="view",
         help=(
             "Режим работы релиз-таблицы: view — вывод в консоль; fill — обновление таблицы; fill-preview — прогон без записи; "
             "compare — дописать сгенерированные формулировки под эталонами и добавить анализ LLM-судьи; "
+            "changelog-preview — собрать готовый текст релизных заметок для вставки в исходный код документации; "
             "refine-preview — генерация предложений улучшений; refine-apply — обновление таблицы новыми текстами."
         ),
     )
@@ -191,7 +193,7 @@ def main() -> int:
         return 0
 
     # Branch: release notes workflow (including refine modes)
-    if args.release_parent or config.release_parent_key or args.mode.startswith("refine"):
+    if args.release_parent or config.release_parent_key or args.mode in {"compare", "changelog-preview"} or args.mode.startswith("refine"):
         parent_key = args.release_parent or config.release_parent_key
         jira_client = JiraClient(
             base_url=config.jira_base_url,
@@ -213,6 +215,9 @@ def main() -> int:
 
         # --- view/fill/fill-preview workflow ---
         if args.mode in {"view", "fill", "fill-preview"}:
+            if not parent_key:
+                logging.error("Release parent key is required for %s mode (use --release-parent or RELEASE_PARENT_KEY)", args.mode)
+                return 1
             try:
                 items = build_items(jira_client, llm_client, config, parent_key)
             except Exception as exc:
@@ -271,6 +276,39 @@ def main() -> int:
 
             logging.info("Updated release table in %s", target_key)
             logging.info("Total prompt characters sent to LLM: %d", LLMClient.get_total_prompt_chars())
+            return 0
+
+        # --- changelog preview workflow ---
+        if args.mode == "changelog-preview":
+            target_key = args.release_target or config.target_issue_key
+            if not target_key:
+                logging.error("Target issue key is required for changelog-preview mode (use --release-target or TARGET_ISSUE_KEY)")
+                return 1
+            if "-" not in str(target_key):
+                logging.error("For changelog-preview use full target issue key, e.g. MSP-8968.")
+                return 1
+
+            try:
+                url = f"{config.jira_base_url.rstrip('/')}/rest/api/{config.jira_api_version or '3'}/issue/{target_key}"
+                params = {"fields": "description"}
+                r2 = jira_client._session.get(url, params=params, timeout=config.request_timeout)
+                r2.raise_for_status()
+                target_payload = r2.json()
+            except Exception as exc:
+                logging.exception("Failed to fetch target issue %s: %s", target_key, exc)
+                return 1
+
+            current_desc = target_payload.get("fields", {}).get("description")
+            if not isinstance(current_desc, str):
+                logging.error("Target issue description is not a wiki string (likely ADF). Changelog preview is not supported.")
+                return 1
+
+            changelog_text = make_doc_changelog_from_description(current_desc)
+            if not changelog_text:
+                logging.error("Release table not found or contains no parsable rows for changelog generation.")
+                return 1
+
+            print(changelog_text)
             return 0
 
         # --- compare workflow ---

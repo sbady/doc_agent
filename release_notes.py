@@ -14,6 +14,18 @@ logger = logging.getLogger(__name__)
 
 RELEASE_TABLE_HEADER_LINE = "||Задача||Стенд||Тип задачи||Шаблоны||Мануал||Краткое описание||"
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
+_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+_EMOJI_PRO_T1 = "🩲"
+_EMOJI_IMPULSE = "👙"
+_EMOJI_FORMS = "👽"
+_COLOR_MACRO_RE = re.compile(r"\{color:(?P<color>[^}]+)\}(?P<inner>.*?)\{color\}", flags=re.IGNORECASE | re.DOTALL)
+_RED_COLOR_VALUES = {
+    "de350b",
+    "ff5630",
+    "d04437",
+    "cf1322",
+    "red",
+}
 
 
 # ----------------------------
@@ -653,6 +665,247 @@ def extract_release_table_text(desc: str) -> str:
     if header_idx > 0 and re.match(r"(?mi)^h2\.\s*Таблица релиза", lines[header_idx - 1] or ""):
         start = header_idx - 1
     return "\n".join(lines[start:table_end_idx]).strip()
+
+
+def _normalize_stand_value(stand: str) -> str:
+    t = (stand or "").strip().lower()
+    if t in {"ms", "mashroom"}:
+        return "MS"
+    if t in {"wce", "we.cloud", "we.cloud events"}:
+        return "WCE"
+    if t in {"оба", "оба?", "both"}:
+        return "Оба"
+    return (stand or "").strip()
+
+
+def _normalize_kind_value(kind: str) -> str:
+    t = (kind or "").strip().lower()
+    if t in {"баг", "bug", "ошибка", "error"}:
+        return "Баг"
+    return "Фича"
+
+
+def _strip_generated_block(short_text: str) -> str:
+    text = (short_text or "").replace("\\\\", "\n").strip()
+    marker = re.search(r"(?mi)^\s*_Сгенерировано(?:\s*#\d+)?\s*:_\s*$", text)
+    if marker:
+        text = text[: marker.start()].strip()
+    else:
+        marker2 = re.search(r"(?i)_Сгенерировано(?:\s*#\d+)?\s*:_", text)
+        if marker2:
+            text = text[: marker2.start()].strip()
+    return text.strip()
+
+
+def _is_not_described_text(short_text: str) -> bool:
+    t = (short_text or "").strip().lower().replace("ё", "е")
+    t = re.sub(r"[\s\.,!?:;…\"'`]+$", "", t)
+    # Accept truncated variants like "не описывае", "не описыва..."
+    return t.startswith("не описыва")
+
+
+def _is_red_color_value(color_value: str) -> bool:
+    c = (color_value or "").strip().lower().replace(" ", "")
+    if c.startswith("#"):
+        c = c[1:]
+    return c in _RED_COLOR_VALUES
+
+
+def _replace_red_color_macros_with_ms_conditional(text: str) -> str:
+    if not text:
+        return ""
+
+    def repl(match: re.Match[str]) -> str:
+        color = match.group("color") or ""
+        inner = match.group("inner") or ""
+        if not _is_red_color_value(color):
+            return match.group(0)
+
+        # Jira often wraps highlighted fragments with +...+.
+        cleaned = inner.strip()
+        while cleaned.startswith("+") and cleaned.endswith("+") and len(cleaned) > 1:
+            cleaned = cleaned[1:-1].strip()
+        if not cleaned:
+            return ""
+        return f"{{% if domen != 'WCE' %}}{cleaned}{{% endif %}}"
+
+    return _COLOR_MACRO_RE.sub(repl, text)
+
+
+def _extract_title_from_task_cell(task_cell: str) -> str:
+    m = re.search(r"\[[A-Z][A-Z0-9]+-\d+\|[^\]]+\]\s*(.*)", task_cell or "")
+    if not m:
+        return (task_cell or "").strip()
+    return (m.group(1) or "").strip()
+
+
+def _detect_wce_special_bucket(title: str) -> Optional[str]:
+    title = title or ""
+    selected = []
+    if _EMOJI_PRO_T1 in title:
+        selected.append(("pro_t1", _EMOJI_PRO_T1))
+    if _EMOJI_IMPULSE in title:
+        selected.append(("impulse", _EMOJI_IMPULSE))
+    if _EMOJI_FORMS in title:
+        selected.append(("forms", _EMOJI_FORMS))
+    if len(selected) != 1:
+        return None
+
+    chosen_name, chosen_emoji = selected[0]
+    all_emojis = [e for e in _EMOJI_RE.findall(title) if e != "\ufe0f"]
+    if not all_emojis:
+        return chosen_name
+    if any(e != chosen_emoji for e in all_emojis):
+        return None
+    return chosen_name
+
+
+def _collect_release_table_items_for_changelog(desc: str) -> List[RNItem]:
+    lines = (desc or "").splitlines()
+    header_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == RELEASE_TABLE_HEADER_LINE:
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+
+    rows, _ = _collect_table_rows(lines, header_idx + 1)
+    items: List[RNItem] = []
+    for _, _, row_text in rows:
+        cells = _row_text_to_cells(row_text)
+        if len(cells) < 6:
+            continue
+        key = _extract_issue_key_from_task_cell(cells[0])
+        if not key:
+            continue
+        task_cell = cells[0]
+        title = _extract_title_from_task_cell(task_cell)
+        url_match = re.search(r"\[[A-Z][A-Z0-9]+-\d+\|([^\]]+)\]", task_cell)
+        url = url_match.group(1) if url_match else ""
+        items.append(
+            RNItem(
+                key=key,
+                title=title,
+                url=url,
+                stand=(cells[1] if len(cells) > 1 else "").strip(),
+                kind=(cells[2] if len(cells) > 2 else "").strip(),
+                short=(cells[5] if len(cells) > 5 else "").strip(),
+            )
+        )
+    return items
+
+
+def _append_bullets(lines: List[str], texts: List[str], *, indent: str = "") -> None:
+    for text in texts:
+        lines.append(f"{indent}* {text}")
+
+
+def make_doc_changelog_from_description(desc: str) -> str:
+    """Build changelog text for docs source code from release table in issue description."""
+    raw_items = _collect_release_table_items_for_changelog(desc)
+    if not raw_items:
+        return ""
+
+    common_features: List[str] = []
+    wce_features: List[str] = []
+    ms_features: List[str] = []
+    common_bugs: List[str] = []
+    wce_bugs: List[str] = []
+    ms_bugs: List[str] = []
+    wce_portal_pro_t1: List[str] = []
+    wce_portal_impulse: List[str] = []
+    wce_forms: List[str] = []
+
+    for item in raw_items:
+        short = _strip_generated_block(item.short)
+        short = _replace_red_color_macros_with_ms_conditional(short)
+        short = re.sub(r"\s+", " ", short).strip()
+        if not short or _is_not_described_text(short):
+            continue
+
+        stand = _normalize_stand_value(item.stand)
+        kind = _normalize_kind_value(item.kind)
+
+        if stand == "WCE":
+            special = _detect_wce_special_bucket(item.title)
+            if special == "pro_t1":
+                wce_portal_pro_t1.append(short)
+                continue
+            if special == "impulse":
+                wce_portal_impulse.append(short)
+                continue
+            if special == "forms":
+                wce_forms.append(short)
+                continue
+
+        if stand == "MS":
+            if kind == "Баг":
+                ms_bugs.append(short)
+            else:
+                ms_features.append(short)
+            continue
+
+        if stand == "WCE":
+            if kind == "Баг":
+                wce_bugs.append(short)
+            else:
+                wce_features.append(short)
+            continue
+
+        # "Оба", "Оба?" and unknown stands are treated as shared changes.
+        if kind == "Баг":
+            common_bugs.append(short)
+        else:
+            common_features.append(short)
+
+    lines: List[str] = []
+    lines.append("Что было сделано:")
+    lines.append("")
+    _append_bullets(lines, common_features)
+    lines.append("")
+
+    lines.append("{% if domen == 'WCE' %}")
+    lines.append("")
+    _append_bullets(lines, wce_features)
+
+    if wce_portal_pro_t1:
+        lines.append("* Работы над порталом pro.t1.ru:")
+        _append_bullets(lines, wce_portal_pro_t1, indent="  ")
+    if wce_portal_impulse:
+        lines.append("* Работы над порталом Импульс:")
+        _append_bullets(lines, wce_portal_impulse, indent="  ")
+    if wce_forms:
+        lines.append("* Работы над конструктором форм:")
+        _append_bullets(lines, wce_forms, indent="  ")
+
+    lines.append("")
+    lines.append("{% else %}")
+    lines.append("")
+    _append_bullets(lines, ms_features)
+    lines.append("")
+    lines.append("{% endif %}")
+    lines.append("")
+
+    if common_bugs:
+        lines.append("* Исправлены ошибки:")
+        _append_bullets(lines, common_bugs, indent="  ")
+        lines.append("")
+
+    lines.append("{% if domen == 'WCE' %}")
+    lines.append("")
+    _append_bullets(lines, wce_bugs, indent="  ")
+    lines.append("")
+    lines.append("{% else %}")
+    lines.append("")
+    _append_bullets(lines, ms_bugs, indent="  ")
+    lines.append("")
+    lines.append("{% endif %}")
+
+    # Trim trailing blank lines and normalize spacing.
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
 
 
 def upsert_judge_panel(desc: str, report_text: str, *, mode: str, run_index: Optional[int]) -> str:

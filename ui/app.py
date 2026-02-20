@@ -417,6 +417,26 @@ def extract_issue_short_text(stdout: str, stderr: str = "") -> str:
     return lines[-1]
 
 
+def extract_changelog_text(stdout: str, stderr: str = "") -> str:
+    combined = ((stdout or "") + "\n" + (stderr or "")).strip()
+    if not combined:
+        return ""
+    lines = combined.splitlines()
+
+    start_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("Что было сделано:"):
+            start_idx = i
+            break
+    if start_idx is None:
+        return combined
+
+    out = lines[start_idx:]
+    while out and (LOG_PREFIX_RE.match(out[-1].strip()) or "Total prompt characters sent to LLM" in out[-1]):
+        out.pop()
+    return "\n".join(out).strip()
+
+
 def add_history(entry: Dict[str, Any]) -> None:
     history = st.session_state.setdefault("run_history", [])
     history.insert(0, entry)
@@ -588,44 +608,7 @@ def release_notes_tools() -> None:
     )
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader("B1. Одна релизная строка")
-    with st.expander("Что делает", expanded=False):
-        st.markdown(
-            """
-- Вход: ключ Jira-задачи.  
-- Выход: краткое описание для релизной таблицы.
-            """
-        )
-    issue_key = st.text_input("Ключ задачи", placeholder="MSP-1234", key="b1_issue")
-    b1_log_debug = st.checkbox("DEBUG лог", key="b1_debug", value=False)
-    if st.button("Сгенерировать", key="b1_run", use_container_width=True):
-        if not issue_key.strip():
-            st.error("Укажи ключ задачи.")
-        else:
-            args = [sys.executable, str(MAIN_SCRIPT), "--issue-short", issue_key.strip()]
-            if b1_log_debug:
-                args.extend(["--log-level", "DEBUG"])
-            result = execute_command_ui(
-                "B1: одна релизная строка",
-                args,
-                timeout_sec=3600,
-                live_debug=b1_log_debug,
-            )
-            if result.code == 0 and result.stdout.strip():
-                parsed = extract_issue_short_text(result.stdout, result.stderr).strip()
-                if parsed:
-                    st.session_state["b1_result_text"] = parsed
-                    # force-refresh widget value even when key already exists
-                    st.session_state["b1_out"] = parsed
-    b1_text = st.session_state.get("b1_result_text", "")
-    if b1_text:
-        current = st.text_area("Результат", value=b1_text, height=100, key="b1_out")
-        st.session_state["b1_result_text"] = current
-        clipboard_button("Скопировать результат", current, "b1_result")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader("B2. Заполнение релизной таблицы в Jira")
+    st.subheader("B1. Заполнение релизной таблицы в Jira")
     with st.expander("Что делает и что подготовить", expanded=False):
         st.markdown(
             """
@@ -663,7 +646,7 @@ def release_notes_tools() -> None:
                 b2_log_level,
             ]
             execute_command_ui(
-                "B2: заполнение релизной таблицы",
+                "B1: заполнение релизной таблицы",
                 args,
                 timeout_sec=3600,
                 live_debug=(b2_log_level == "DEBUG"),
@@ -671,7 +654,102 @@ def release_notes_tools() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader("B3. Preview релизной таблицы")
+    st.subheader("B2. Готовый текст для вставки в исходный код документации")
+    with st.expander("Что делает", expanded=False):
+        st.markdown(
+            """
+Пайплайн:
+1. На вход подается `release target` с уже заполненной релизной таблицей.
+2. Таблица парсится построчно (сохраняется порядок строк).
+3. Строки группируются по стендам/типам задач и раскладываются по условным блокам:
+   - общий блок;
+   - `{% if domen == 'WCE' %}`;
+   - `{% else %}`.
+4. На выходе формируется готовый `changelog`-текст для вставки в исходный код документации.
+
+Важно:
+- Красный фрагмент в wiki-макросе `{color:#de350b}...{color}` трактуется как *MS-only*.
+- Такой фрагмент автоматически оборачивается в `{% if domen != 'WCE' %}...{% endif %}`.
+- Jira в этом режиме не изменяется.
+            """
+        )
+    target_key_changelog = st.text_input("Release target", placeholder="MSP-8000", key="b2c_target")
+    b2c_log_level = st.selectbox("Уровень логов", ["INFO", "DEBUG"], index=0, key="b2c_log")
+    if st.button("Сгенерировать текст", key="b2c_run", use_container_width=True):
+        if not target_key_changelog.strip():
+            st.error("Укажи release target.")
+        else:
+            args = [
+                sys.executable,
+                str(MAIN_SCRIPT),
+                "--release-target",
+                target_key_changelog.strip(),
+                "--mode",
+                "changelog-preview",
+                "--log-level",
+                b2c_log_level,
+            ]
+            result = execute_command_ui(
+                "B2: changelog-текст для документации",
+                args,
+                timeout_sec=3600,
+                live_debug=(b2c_log_level == "DEBUG"),
+            )
+            if result.code == 0 and result.stdout.strip():
+                parsed = extract_changelog_text(result.stdout, result.stderr).strip()
+                if parsed:
+                    st.session_state["b2c_text"] = parsed
+                    st.session_state["b2c_editor"] = parsed
+    b2c_text = st.session_state.get("b2c_text", "")
+    if b2c_text:
+        current_changelog = st.text_area(
+            "Текст для вставки в исходный код документации (можно править перед копированием)",
+            value=b2c_text,
+            height=380,
+            key="b2c_editor",
+        )
+        st.session_state["b2c_text"] = current_changelog
+        clipboard_button("Скопировать текст", current_changelog, "b2c_text")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.subheader("B3. Одна релизная строка")
+    with st.expander("Что делает", expanded=False):
+        st.markdown(
+            """
+- Вход: ключ Jira-задачи.  
+- Выход: краткое описание для релизной таблицы.
+            """
+        )
+    issue_key = st.text_input("Ключ задачи", placeholder="MSP-1234", key="b1_issue")
+    b1_log_debug = st.checkbox("DEBUG лог", key="b1_debug", value=False)
+    if st.button("Сгенерировать", key="b1_run", use_container_width=True):
+        if not issue_key.strip():
+            st.error("Укажи ключ задачи.")
+        else:
+            args = [sys.executable, str(MAIN_SCRIPT), "--issue-short", issue_key.strip()]
+            if b1_log_debug:
+                args.extend(["--log-level", "DEBUG"])
+            result = execute_command_ui(
+                "B3: одна релизная строка",
+                args,
+                timeout_sec=3600,
+                live_debug=b1_log_debug,
+            )
+            if result.code == 0 and result.stdout.strip():
+                parsed = extract_issue_short_text(result.stdout, result.stderr).strip()
+                if parsed:
+                    st.session_state["b1_result_text"] = parsed
+                    st.session_state["b1_out"] = parsed
+    b1_text = st.session_state.get("b1_result_text", "")
+    if b1_text:
+        current = st.text_area("Результат", value=b1_text, height=100, key="b1_out")
+        st.session_state["b1_result_text"] = current
+        clipboard_button("Скопировать результат", current, "b1_result")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.subheader("B4. Preview релизной таблицы")
     with st.expander("Что делает", expanded=False):
         st.markdown(
             """
@@ -689,7 +767,7 @@ def release_notes_tools() -> None:
             if b3_log_debug:
                 args.extend(["--log-level", "DEBUG"])
             result = execute_command_ui(
-                "B3: preview релизной таблицы",
+                "B4: preview релизной таблицы",
                 args,
                 timeout_sec=3600,
                 live_debug=b3_log_debug,
@@ -709,7 +787,7 @@ def release_notes_tools() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader("B4. Compare: эталон vs сгенерированное")
+    st.subheader("B5. Compare: эталон vs сгенерированное")
     with st.expander("Что делает и риски", expanded=False):
         st.markdown(
             """
@@ -753,7 +831,7 @@ def release_notes_tools() -> None:
             if skip_judge:
                 args.append("--skip-judge")
             result = execute_command_ui(
-                "B4: compare",
+                "B5: compare",
                 args,
                 timeout_sec=7200,
                 live_debug=(b4_log_level == "DEBUG"),
