@@ -889,7 +889,7 @@ def doc_qa_tools() -> None:
         max_pages = st.number_input(
             "Лимит страниц (0 = без лимита)",
             min_value=0,
-            value=50,
+            value=0,
             step=10,
             key="docqa_max_pages",
         )
