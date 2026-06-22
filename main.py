@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict
 import re
 
@@ -100,6 +101,12 @@ def configure_logging(level_name: str | None) -> None:
     # Allow configuring via environment variable LOG_LEVEL when flag not provided
     effective_level = (level_name or os.getenv("LOG_LEVEL") or "INFO").upper()
     numeric_level = getattr(logging, effective_level, logging.INFO)
+    for handle in (sys.stdout, sys.stderr):
+        if hasattr(handle, "reconfigure"):
+            try:
+                handle.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     logging.basicConfig(
         level=numeric_level,
         format="%(asctime)s %(levelname)-8s %(name)s - %(message)s",

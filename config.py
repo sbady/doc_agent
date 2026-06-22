@@ -158,6 +158,9 @@ class AppConfig:
         value = os.getenv(key)
         if value is None:
             return default
+        value = value.strip()
+        if value == "":
+            return default
         try:
             return int(value)
         except ValueError as exc:
@@ -167,6 +170,9 @@ class AppConfig:
     def _get_float(key: str, default: float) -> float:
         value = os.getenv(key)
         if value is None:
+            return default
+        value = value.strip()
+        if value == "":
             return default
         try:
             return float(value)

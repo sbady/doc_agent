@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html as htmllib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -20,6 +21,7 @@ MAIN_SCRIPT = ROOT_DIR / "main.py"
 SANITIZER_SCRIPT = ROOT_DIR / "scripts" / "check_sanitizer.py"
 STOPWORDS_SCRIPT = ROOT_DIR / "stop_words_checker-main" / "stopword_crawler.py"
 STOPWORDS_DEFAULT = ROOT_DIR / "stop_words_checker-main" / "stopwords.txt"
+DOC_EXPORTER_SCRIPT = ROOT_DIR / "stop_words_checker-main" / "doc_exporter.py"
 ARTICLE_PROMPT_PATH = ROOT_DIR / "prompt_templates" / "article_update_from_jira.txt"
 
 
@@ -33,10 +35,27 @@ class CommandResult:
 
 
 LOG_PREFIX_RE = re.compile(r"^(?:OUTPUT:)?\d{4}-\d{2}-\d{2}\s")
+DOC_URL_PRESETS: Dict[str, Dict[str, str]] = {
+    "wce_prod": {
+        "label": "WCE prod",
+        "url": "https://docs.wecloud.events/ru/",
+        "hint": "Продовый стенд WCE. Используется корень раздела, чтобы crawler обошел всю документацию.",
+    },
+    "wce_dev": {
+        "label": "WCE dev",
+        "url": "https://diplo-wce.pikemedia.live/ru/",
+        "hint": "Дев-стенд WCE. Используется корень раздела, чтобы crawler обошел всю документацию.",
+    },
+    "custom": {
+        "label": "Другой URL",
+        "url": "",
+        "hint": "Ручной ввод для любой другой документации.",
+    },
+}
 
 
 def init_page() -> None:
-    st.set_page_config(page_title="Release Notes Studio", page_icon="RN", layout="wide")
+    st.set_page_config(page_title="DocsStudio", page_icon="DS", layout="wide")
     st.markdown(
         """
         <style>
@@ -62,6 +81,23 @@ def init_page() -> None:
                     var(--bg);
                 color: var(--text) !important;
                 font-family: "IBM Plex Sans", sans-serif;
+            }
+
+            [data-testid="stHeader"] {
+                background: rgba(246, 249, 246, .96) !important;
+                color: var(--text) !important;
+                border-bottom: 1px solid rgba(215, 225, 215, .8);
+            }
+
+            [data-testid="stHeader"] * {
+                color: var(--text) !important;
+                fill: var(--text) !important;
+            }
+
+            [data-testid="stToolbar"],
+            [data-testid="stDecoration"] {
+                background: transparent !important;
+                color: var(--text) !important;
             }
 
             .block-title {
@@ -238,13 +274,15 @@ def init_page() -> None:
             }
 
             .log-ok {
-                background: #eef8f1;
-                border-color: #cde4d3;
+                background: linear-gradient(180deg, #effaf2 0%, #e4f6ea 100%);
+                border-color: #8fcca0;
+                box-shadow: inset 0 0 0 1px rgba(31, 106, 67, .08);
             }
 
             .log-err {
-                background: #fff1ef;
-                border-color: #f1cbc5;
+                background: linear-gradient(180deg, #fff4f1 0%, #ffe7e2 100%);
+                border-color: #e8a59a;
+                box-shadow: inset 0 0 0 1px rgba(154, 58, 22, .08);
             }
 
             /* Streamlit top-right menu visibility */
@@ -290,10 +328,14 @@ def load_article_prompt() -> str:
 
 def run_command(args: List[str], timeout_sec: int = 3600) -> CommandResult:
     start = time.time()
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     process = subprocess.run(
         args,
         cwd=str(ROOT_DIR),
         capture_output=True,
+        env=child_env,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -310,9 +352,13 @@ def run_command(args: List[str], timeout_sec: int = 3600) -> CommandResult:
 
 def run_command_live(args: List[str], timeout_sec: int = 3600, tail_lines: int = 20) -> CommandResult:
     start = time.time()
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     process = subprocess.Popen(
         args,
         cwd=str(ROOT_DIR),
+        env=child_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -338,7 +384,7 @@ def run_command_live(args: List[str], timeout_sec: int = 3600, tail_lines: int =
                 if len(tail) > tail_lines:
                     tail = tail[-tail_lines:]
                 live_box.text_area(
-                    f"Логи (последние {tail_lines} строк, обновляется во время выполнения)",
+                    f"Живой лог: последние {tail_lines} строк",
                     value="\n".join(tail),
                     height=220,
                 )
@@ -356,7 +402,7 @@ def run_command_live(args: List[str], timeout_sec: int = 3600, tail_lines: int =
             if len(tail) > tail_lines:
                 tail = tail[-tail_lines:]
             live_box.text_area(
-                f"Логи (последние {tail_lines} строк, обновляется во время выполнения)",
+                f"Живой лог: последние {tail_lines} строк",
                 value="\n".join(tail),
                 height=220,
             )
@@ -385,6 +431,43 @@ def render_log_block(text: str, *, kind: str) -> None:
         f"<div class='logbox {css_class}'><pre>{escaped}</pre></div>",
         unsafe_allow_html=True,
     )
+
+
+def clean_log_text(text: str) -> str:
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        if LOG_PREFIX_RE.match(line.strip()):
+            continue
+        if "Total prompt characters sent to LLM" in line:
+            continue
+        if "LLM request:" in line or "LLM response" in line:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def short_command_output(result: CommandResult) -> str:
+    combined = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if not combined:
+        return ""
+
+    if result.code == 0:
+        text = clean_log_text(result.stdout)
+        if not text:
+            return ""
+        return text[-6000:]
+
+    lines = [ln for ln in combined.splitlines() if ln.strip()]
+    problem_lines = [
+        ln
+        for ln in lines
+        if re.search(r"error|exception|traceback|failed|ошиб|не удалось|enoent|err ", ln, flags=re.IGNORECASE)
+    ]
+    selected = problem_lines[-25:] if problem_lines else lines[-40:]
+    return "\n".join(selected).strip()[-6000:]
 
 
 def extract_issue_short_text(stdout: str, stderr: str = "") -> str:
@@ -452,11 +535,16 @@ def render_result(name: str, result: CommandResult, extra: Optional[Dict[str, An
     )
     st.caption("Команда: " + " ".join(result.command))
 
+    readable_output = short_command_output(result)
+    if readable_output:
+        with st.expander("Краткий вывод", expanded=(result.code != 0)):
+            render_log_block(readable_output, kind=("ok" if result.code == 0 else "err"))
+
     if result.stdout.strip():
-        with st.expander("stdout (полный лог)", expanded=False):
+        with st.expander("Технический лог stdout", expanded=False):
             render_log_block(result.stdout, kind=("ok" if result.code == 0 else "err"))
     if result.stderr.strip():
-        with st.expander("stderr (полный лог)", expanded=(result.code != 0)):
+        with st.expander("Технический лог stderr", expanded=(result.code != 0)):
             render_log_block(result.stderr, kind="err")
 
     add_history(
@@ -515,6 +603,37 @@ def clipboard_button(label: str, text: str, key: str) -> None:
             st.success(msg)
         else:
             st.warning(msg)
+
+
+def doc_url_input(section_key: str, input_label: str) -> str:
+    preset_key = st.radio(
+        "Документация",
+        options=list(DOC_URL_PRESETS.keys()),
+        format_func=lambda key: DOC_URL_PRESETS[key]["label"],
+        horizontal=True,
+        key=f"{section_key}_doc_preset",
+    )
+    preset = DOC_URL_PRESETS[preset_key]
+
+    if preset_key == "custom":
+        start_url = st.text_input(
+            input_label,
+            placeholder="https://docs.example.com/ru/index.html",
+            key=f"{section_key}_doc_url_custom",
+        )
+        st.caption(preset["hint"])
+        return start_url
+
+    preset_url_key = f"{section_key}_doc_url_preset"
+    if st.session_state.get(preset_url_key) != preset["url"]:
+        st.session_state[preset_url_key] = preset["url"]
+    st.text_input(
+        input_label,
+        key=preset_url_key,
+        disabled=True,
+    )
+    st.caption(preset["hint"])
+    return preset["url"]
 
 
 def show_overview() -> None:
@@ -874,7 +993,7 @@ def doc_qa_tools() -> None:
     )
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    start_url = st.text_input("Стартовый URL", placeholder="https://docs.example.com/ru/", key="docqa_url")
+    start_url = doc_url_input("docqa_scan", "Стартовый URL")
     stop_words_path = st.text_input("Файл стоп-слов", value=str(STOPWORDS_DEFAULT), key="docqa_stopwords")
     c1, c2 = st.columns(2)
     with c1:
@@ -961,6 +1080,89 @@ def doc_qa_tools() -> None:
                 st.warning("JSON-отчет не распознан. Проверь stdout/stderr.")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.subheader("Экспорт документации для RAG")
+    with st.expander("Что делает", expanded=False):
+        st.markdown(
+            """
+- обходит документацию по стартовому URL;
+- сохраняет статьи отдельными файлами с сохранением структуры каталогов;
+- очищает визуальное форматирование, но оставляет заголовки, списки и ссылки;
+- пишет `manifest.json` со списком экспортированных статей.
+            """
+        )
+
+    export_url = doc_url_input("docqa_export", "Стартовый URL для экспорта")
+    export_dir = st.text_input(
+        "Папка экспорта",
+        value=str(ROOT_DIR / "exports" / "docs_corpus"),
+        key="doc_export_dir",
+    )
+    c3, c4 = st.columns(2)
+    with c3:
+        export_delay = st.number_input(
+            "Задержка между запросами (сек)",
+            min_value=0.0,
+            value=0.3,
+            step=0.1,
+            key="doc_export_delay",
+        )
+    with c4:
+        export_max_pages = st.number_input(
+            "Лимит страниц (0 = без лимита)",
+            min_value=0,
+            value=0,
+            step=10,
+            key="doc_export_max_pages",
+        )
+
+    if st.button("Экспортировать статьи", key="doc_export_run", use_container_width=True):
+        if not export_url.strip():
+            st.error("Укажи стартовый URL.")
+        elif not export_dir.strip():
+            st.error("Укажи папку экспорта.")
+        else:
+            args = [
+                sys.executable,
+                str(DOC_EXPORTER_SCRIPT),
+                "--url",
+                export_url.strip(),
+                "--output-dir",
+                export_dir.strip(),
+                "--delay",
+                str(export_delay),
+            ]
+            if export_max_pages > 0:
+                args.extend(["--max-pages", str(export_max_pages)])
+
+            result = execute_command_ui(
+                "Doc export: экспорт документации",
+                args,
+                timeout_sec=7200,
+                live_debug=False,
+            )
+
+            manifest_path = Path(export_dir.strip()) / "manifest.json"
+            if result.code == 0 and manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    m1, m2 = st.columns(2)
+                    m1.metric("Экспортировано статей", str(manifest.get("articles_exported", 0)))
+                    m2.metric("Не удалось обработать", str(len(manifest.get("failed", []))))
+                    with st.expander("Файлы экспорта", expanded=False):
+                        rows = [
+                            {
+                                "Статья": item.get("title", ""),
+                                "Файл": item.get("output_path", ""),
+                            }
+                            for item in manifest.get("articles", [])
+                        ]
+                        if rows:
+                            st.dataframe(rows, use_container_width=True, hide_index=True)
+                except Exception:
+                    st.warning("Экспорт завершен, но manifest.json не удалось прочитать.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 def show_history() -> None:
     st.markdown("<h3 class='block-title'>История запусков</h3>", unsafe_allow_html=True)
@@ -982,8 +1184,11 @@ def show_history() -> None:
 
 def main() -> None:
     init_page()
-    st.markdown("<h1 class='block-title'>Release Notes Studio</h1>", unsafe_allow_html=True)
-    st.markdown("<p class='subtle'>Единый интерфейс для релизных заметок и Doc QA.</p>", unsafe_allow_html=True)
+    st.markdown("<h1 class='block-title'>DocsStudio</h1>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='subtle'>Интерфейс для автоматизации релизной документации, проверок и экспорта корпуса документации.</p>",
+        unsafe_allow_html=True,
+    )
 
     tab_overview, tab_release, tab_docqa, tab_history = st.tabs(
         ["Обзор процесса", "Релизные заметки", "Проверка документации", "История запусков"]

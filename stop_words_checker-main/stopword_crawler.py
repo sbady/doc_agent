@@ -209,6 +209,8 @@ def normalize_url(raw_url: str) -> Optional[str]:
         return None
 
     path = parsed.path or "/"
+    if path.endswith(("/index.html", "/index.htm")):
+        path = path.rsplit("/", 1)[0] or "/"
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
     normalized = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))

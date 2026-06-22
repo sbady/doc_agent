@@ -20,3 +20,6 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+
+# Derived/regenerated artifacts (Doc QA corpus, Jira description backups)
+exports/

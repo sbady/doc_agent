@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -40,12 +41,15 @@ class LLMClient:
         # Log outgoing prompt (preview) at INFO for traceability
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
         prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""
+        request_meta = self._request_log_meta()
         logger.info(
-            "Sending prompt to LLM: endpoint=%s, model=%s, temperature=%s, max_tokens=%s, prompt_chars=%d",
+            "LLM request: endpoint=%s, model=%s, token_param=%s, token_limit=%s, temperature=%s, reasoning_effort=%s, prompt_chars=%d",
             self._endpoint,
             self._model,
-            self._temperature,
-            self._max_tokens,
+            request_meta["token_param"],
+            request_meta["token_limit"],
+            request_meta["temperature"],
+            request_meta["reasoning_effort"],
             len(prompt),
         )
         logger.debug("Prompt preview: %s", prompt_preview)
@@ -79,12 +83,15 @@ class LLMClient:
         self._add_prompt_chars(len(prompt))
         prompt_preview = (prompt[:500] + "…") if len(prompt) > 500 else prompt
         prompt_tail = ("…" + prompt[-200:]) if len(prompt) > 700 else ""
+        request_meta = self._request_log_meta()
         logger.info(
-            "Sending prompt to LLM (custom template): endpoint=%s, model=%s, temperature=%s, max_tokens=%s, prompt_chars=%d",
+            "LLM request (custom template): endpoint=%s, model=%s, token_param=%s, token_limit=%s, temperature=%s, reasoning_effort=%s, prompt_chars=%d",
             self._endpoint,
             self._model,
-            self._temperature,
-            self._max_tokens,
+            request_meta["token_param"],
+            request_meta["token_limit"],
+            request_meta["temperature"],
+            request_meta["reasoning_effort"],
             len(prompt),
         )
         logger.debug("Prompt preview: %s", prompt_preview)
@@ -132,10 +139,15 @@ class LLMClient:
             payload: Dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
-                "temperature": self._temperature,
             }
+            if self._should_send_temperature():
+                payload["temperature"] = self._temperature
+            reasoning_effort = self._chat_reasoning_effort()
+            if reasoning_effort:
+                payload["reasoning_effort"] = reasoning_effort
             if self._max_tokens is not None:
-                payload["max_tokens"] = self._max_tokens
+                token_key = self._chat_token_param_name()
+                payload[token_key] = self._max_tokens
         else:
             payload = {
                 "prompt": prompt,
@@ -174,14 +186,72 @@ class LLMClient:
 
         return response.json()
 
+    def _chat_token_param_name(self) -> str:
+        """Use provider/model-specific token parameter names for chat completions."""
+        endpoint = (self._endpoint or "").lower()
+        model = (self._model or "").lower()
+
+        # OpenAI GPT-5 chat models use max_completion_tokens instead of max_tokens.
+        if "api.openai.com" in endpoint and model.startswith("gpt-5"):
+            return "max_completion_tokens"
+
+        return "max_tokens"
+
+    def _should_send_temperature(self) -> bool:
+        """Avoid unsupported temperature overrides for OpenAI GPT-5 chat models."""
+        endpoint = (self._endpoint or "").lower()
+        model = (self._model or "").lower()
+
+        if "api.openai.com" in endpoint and model.startswith("gpt-5"):
+            return False
+
+        return True
+
+    def _chat_reasoning_effort(self) -> Optional[str]:
+        """Tune reasoning effort for GPT-5 family using currently supported OpenAI values."""
+        endpoint = (self._endpoint or "").lower()
+        model = (self._model or "").lower()
+
+        if "api.openai.com" in endpoint and model.startswith("gpt-5"):
+            # OpenAI GPT-5 chat models accept: none, low, medium, high, xhigh.
+            # For release-note summarization we want to avoid spending the budget on hidden reasoning.
+            if "nano" in model:
+                return "none"
+            return "low"
+
+        return None
+
+    def _request_log_meta(self) -> Dict[str, Any]:
+        if "/chat/completions" not in (self._endpoint or ""):
+            return {
+                "token_param": "max_tokens",
+                "token_limit": self._max_tokens,
+                "temperature": self._temperature,
+                "reasoning_effort": "none",
+            }
+
+        return {
+            "token_param": self._chat_token_param_name(),
+            "token_limit": self._max_tokens,
+            "temperature": self._temperature if self._should_send_temperature() else "default",
+            "reasoning_effort": self._chat_reasoning_effort() or "none",
+        }
+
     @staticmethod
     def _extract_text(response_payload: Dict[str, Any]) -> str:
         """Extract the text output from common LLM response shapes."""
         if "text" in response_payload:
             return response_payload["text"]
 
+        if "output_text" in response_payload:
+            output_text = response_payload.get("output_text")
+            if isinstance(output_text, str) and output_text.strip():
+                return output_text.strip()
+
         if "output" in response_payload:
-            return response_payload["output"]
+            output_text = LLMClient._extract_text_from_output_items(response_payload["output"])
+            if output_text:
+                return output_text
 
         if "result" in response_payload:
             return response_payload["result"]
@@ -193,8 +263,8 @@ class LLMClient:
                 if "text" in choice:
                     return choice["text"]
                 message = choice.get("message")
-                if isinstance(message, dict) and "content" in message:
-                    content = message.get("content") or ""
+                if isinstance(message, dict):
+                    content = LLMClient._extract_message_text(message)
                     if content:
                         return content
                     # DeepSeek sometimes returns the answer only in reasoning_content
@@ -203,7 +273,130 @@ class LLMClient:
                     if trimmed:
                         return trimmed
 
+        try:
+            payload_preview = json.dumps(response_payload, ensure_ascii=False)[:4000]
+        except Exception:
+            payload_preview = str(response_payload)[:4000]
+        logger.error(
+            "Unexpected LLM response format. Top-level keys=%s payload_preview=%s",
+            list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__,
+            payload_preview,
+        )
         raise ValueError("Unexpected LLM response format")
+
+    @staticmethod
+    def _extract_message_text(message: Dict[str, Any]) -> str:
+        """Handle string and content-part variants used by chat completion APIs."""
+        direct_content = message.get("content")
+        text = LLMClient._extract_text_from_content_value(direct_content)
+        if text:
+            return text
+
+        content_parts = message.get("content_parts")
+        text = LLMClient._extract_text_from_content_value(content_parts)
+        if text:
+            return text
+
+        refusal = message.get("refusal")
+        text = LLMClient._extract_text_from_content_value(refusal)
+        if text:
+            return text
+
+        return ""
+
+    @staticmethod
+    def _extract_text_from_content_value(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    stripped = item.strip()
+                    if stripped:
+                        parts.append(stripped)
+                    continue
+
+                if not isinstance(item, dict):
+                    continue
+
+                item_type = item.get("type")
+                if item_type == "text":
+                    text_value = item.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        parts.append(text_value.strip())
+                        continue
+                    if isinstance(text_value, dict):
+                        nested = text_value.get("value")
+                        if isinstance(nested, str) and nested.strip():
+                            parts.append(nested.strip())
+                            continue
+
+                if item_type == "output_text":
+                    text_value = item.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        parts.append(text_value.strip())
+                        continue
+
+                if item_type == "refusal":
+                    refusal_value = item.get("refusal")
+                    if isinstance(refusal_value, str) and refusal_value.strip():
+                        parts.append(refusal_value.strip())
+                        continue
+
+                for key in ("text", "content", "value"):
+                    nested_value = item.get(key)
+                    if isinstance(nested_value, str) and nested_value.strip():
+                        parts.append(nested_value.strip())
+                        break
+                    if isinstance(nested_value, dict):
+                        nested_text = nested_value.get("value")
+                        if isinstance(nested_text, str) and nested_text.strip():
+                            parts.append(nested_text.strip())
+                            break
+
+            return "\n".join(parts).strip()
+
+        if isinstance(value, dict):
+            for key in ("text", "content", "value", "refusal"):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+
+        return ""
+
+    @staticmethod
+    def _extract_text_from_output_items(output: Any) -> str:
+        if not isinstance(output, list):
+            return ""
+
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type")
+            if item_type == "message":
+                text = LLMClient._extract_message_text(item)
+                if text:
+                    parts.append(text)
+                continue
+
+            content = item.get("content")
+            text = LLMClient._extract_text_from_content_value(content)
+            if text:
+                parts.append(text)
+                continue
+
+            for key in ("text", "content", "value"):
+                nested = item.get(key)
+                text = LLMClient._extract_text_from_content_value(nested)
+                if text:
+                    parts.append(text)
+                    break
+
+        return "\n".join(parts).strip()
 
     @staticmethod
     def _reasoning_to_text(reasoning: str) -> str:
