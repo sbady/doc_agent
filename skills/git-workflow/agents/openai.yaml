@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Workflow"
+  short_description: "Ветки, diff, commit, push и MR в DEV+main по проекту документации"
+  default_prompt: "Use $git-workflow to branch from main by the Jira key, apply the documentation change, then by default publish to DEV and mirror to main: push, create merge requests into both, check conflicts on both targets, and return both MR links. Stop at a draft only if the user said draft-only."
