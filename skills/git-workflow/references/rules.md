@@ -26,10 +26,12 @@ For **edit-intent** tasks (apply changes, not draft-only), the default is:
 
 - push the task branch
 - create the MR into `DEV` and return its link
-- mirror the same changes to the working `main` branch, push, create the MR into `main`, return its link
-- check conflicts against `DEV` and `main` separately
+- check conflicts against `DEV`
+- **do NOT create the MR into `main` by default** — it would stay open through the whole review cycle. Publishing to `main` (branch from `main` + MR into `main`) is a separate step the user initiates once the task is approved
 
-Do **not** wait for the user to re-ask for push, MR links, or the Jira comment.
+Do **not** wait for the user to re-ask for push, the DEV MR link, or the Jira comment.
+
+Commit/MR messages must state **which articles changed and under which Jira task(s)** (`MSP-XXXX`). Do **not** add tool/model authorship (`Co-Authored-By`, Claude, Codex) to commits or MRs.
 
 Stop at "edits prepared" only when the user said draft-only / don't push, or context is insufficient (then ask).
 

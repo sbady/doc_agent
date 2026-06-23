@@ -17,6 +17,10 @@ Avoid:
 - decorative wording
 - explanation of implementation details unless they change user behavior
 
+### Timeless, factual wording
+
+An article states the current fact — what the user can do and how — not what "recently changed". Do **not** use change-over-time framing in article body: «теперь», «уже», «стало доступно», «появилась возможность». State the fact: not «теперь доступна печать бейджа» but «доступна печать бейджа»; not «стало доступно только администратору» but «доступно только администратору». («теперь» belongs to release notes, where the point is to show the change — not to articles.)
+
 ## Formatting
 
 Use Diplodoc/YFM patterns already present in nearby articles.

@@ -30,12 +30,11 @@ When the task means "apply edits" (not "draft only" / "just show me"), do the fu
 1. Create/verify the task branch from `main`.
 2. After `doc-writer` applies edits, inspect `git status` and the diff.
 3. Stage **only** article changes / `toc.yaml` / related assets. Exclude `Tasks` and anything unrelated.
-4. **Publish to `DEV`:** commit, push, **create the merge request into `DEV` and return its link.**
-5. **Mirror to `main`:** carry the same changes into the working `main` branch, push, create the MR into `main`, return its link.
-6. **Check conflicts against both targets separately** (`DEV` and `main`).
-7. Hand the result to `doc-writer`/orchestrator so the **Jira comment** can be prepared (format in `AGENT_WORKFLOWS.md`).
+4. **Publish to `DEV`:** commit, push, **create the merge request into `DEV` and return its link.** Check conflicts against `DEV`.
+5. **Do NOT create the `main` MR by default** — it would stay open through the whole review cycle. Publishing to `main` (branch from `main` + MR into `main`) is a separate step the user initiates once the task is approved.
+6. Hand the result to `doc-writer`/orchestrator so the **Jira comment** can be prepared (format in `AGENT_WORKFLOWS.md`).
 
-Do **not** make the user re-ask for the MR link or the Jira comment — they are part of done.
+Do **not** make the user re-ask for the DEV MR link or the Jira comment — they are part of done. Commit/MR messages state which articles changed and under which Jira task(s) (`MSP-XXXX`); no tool/model authorship.
 
 ### When NOT to push/MR
 
@@ -65,10 +64,10 @@ Stop at "edits prepared, diff shown" only when:
 - confirm scope matches the task
 
 ### 5. Publish (default for edit-intent tasks)
-- commit (default message = Jira key)
+- commit (message states changed articles + Jira task(s); no tool/model authorship)
 - push the task branch
-- create the MR into `DEV`; mirror to `main` and create the MR into `main`
-- return both MR links
+- create the MR into `DEV` and return its link; check conflicts against `DEV`
+- do NOT create the `main` MR by default — publishing to `main` is a separate, user-initiated step
 
 ## Conflict Handling
 
@@ -85,8 +84,8 @@ Return a short operational summary:
 - whether branches were created/pushed
 - changed files; whether unrelated files are present
 - whether commits were created and pushed
-- **MR links for `DEV` and `main`**
-- conflict-check result per target
+- **MR link for `DEV`** (the `main` MR link only if a prod publish was requested)
+- conflict-check result against `DEV` (and `main` only on prod publish)
 
 ## Resources
 
