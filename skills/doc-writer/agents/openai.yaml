@@ -1,4 +1,0 @@
-interface:
-  display_name: "Doc Writer"
-  short_description: "Пишет и обновляет статьи документации"
-  default_prompt: "Use $doc-writer to create or update a Diplodoc/YFM article for the event platform documentation."
