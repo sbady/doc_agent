@@ -13,8 +13,9 @@ Write articles for `doc_diplo` in the project's documentation style. Optimize fo
 2. Read [references/style-guide.md](references/style-guide.md)
 3. Read [references/exemplar-patterns.md](references/exemplar-patterns.md)
 4. If the article targets WCE or both contours, read [references/wce-constraints.md](references/wce-constraints.md)
-5. Use [references/task-input-contract.md](references/task-input-contract.md) to identify missing inputs
-6. Open the target article or choose the closest exemplar article before editing
+5. If the article contains contour-specific functionality, read [references/contour-specific-topics.md](references/contour-specific-topics.md)
+6. Use [references/task-input-contract.md](references/task-input-contract.md) to identify missing inputs
+7. Open the target article or choose the closest exemplar article before editing
 
 ## Workflow
 
@@ -130,6 +131,7 @@ Pause and surface questions instead of guessing when:
 - [references/style-guide.md](references/style-guide.md)
 - [references/exemplar-patterns.md](references/exemplar-patterns.md)
 - [references/wce-constraints.md](references/wce-constraints.md)
+- [references/contour-specific-topics.md](references/contour-specific-topics.md)
 - [references/task-input-contract.md](references/task-input-contract.md)
 
 
